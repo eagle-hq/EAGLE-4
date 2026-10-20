@@ -10,21 +10,12 @@ import pytest
 transformers = pytest.importorskip("transformers")
 
 from eagle_harness.models.eagle4_config import UNPORTED, check_ported  # noqa: E402
+from tests.test_models import _config as _draft_config  # noqa: E402
 
 
 def _config(**extra):
-    base = dict(
-        architectures=["LlamaForCausalLMEagle4"],
-        num_hidden_layers=1,
-        hidden_size=256,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        intermediate_size=512,
-        vocab_size=1000,
-        efficient_lm_head_config={"type": "low_rank", "rank": 32, "num_candidates": 64},
-    )
-    base.update(extra)
-    return transformers.LlamaConfig(**base)
+    head = {"type": "low_rank", "rank": 32, "num_candidates": 64}
+    return _draft_config(**{"efficient_lm_head_config": head, **extra})
 
 
 def test_dense_one_layer_draft_with_the_low_rank_head_is_ported():
