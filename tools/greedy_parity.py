@@ -53,6 +53,18 @@ def load_prompts(path: str, count: int) -> List[dict]:
     return picked
 
 
+def encode_prompt(tokenizer, row: dict) -> List[int]:
+    """The token ids ``run`` sends for a conversation's first turn (chat template applied client side)."""
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": row["turns"][0]},
+    ]
+    text = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False, enable_thinking=True, reasoning_effort="xhigh"
+    )
+    return list(tokenizer.encode(text, add_special_tokens=False))
+
+
 def run(args: argparse.Namespace) -> None:
     from transformers import AutoTokenizer
 
@@ -61,16 +73,9 @@ def run(args: argparse.Namespace) -> None:
     results = []
     t0 = time.time()
     for row in load_prompts(args.data, args.prompts):
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": row["turns"][0]},
-        ]
-        text = tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, tokenize=False, enable_thinking=True, reasoning_effort="xhigh"
-        )
-        input_ids = tokenizer.encode(text, add_special_tokens=False)
+        input_ids = encode_prompt(tokenizer, row)
         payload = {
-            "input_ids": list(input_ids),
+            "input_ids": input_ids,
             "sampling_params": {"temperature": 0, "top_k": 1, "max_new_tokens": args.max_new_tokens},
         }
         if args.top_logprobs:
