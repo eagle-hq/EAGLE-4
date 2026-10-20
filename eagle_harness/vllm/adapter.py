@@ -13,13 +13,32 @@ jobs only), ``none`` (vLLM offers no hook; see VLLM_HOOKS.md open questions).
 from __future__ import annotations
 
 import importlib
+from types import ModuleType
 from typing import NamedTuple, Tuple
 
 
 class HookUse(NamedTuple):
     need: str  # EngineAdapter method or engine-facing need
-    hook: str  # "module:attribute[.attribute]" in vLLM, or "" when vLLM has none
+    hook: str  # "module:attribute[.attribute]" in vLLM (" | " between alternatives), or "" when vLLM has none
     status: str
+
+
+# Where vLLM keeps ``LinearAttnVerifyExtension``: upstream review head first, then the 0.1.0 release engine.
+VERIFY_EXTENSION_MODULES = (
+    "vllm.model_executor.layers.mamba.verify_extension",
+    "vllm.model_executor.layers.mamba.gdn.verify_extension",
+)
+
+
+def verify_extension_module() -> ModuleType:
+    """The module of the running vLLM that defines ``LinearAttnVerifyExtension`` and its row types."""
+    for name in VERIFY_EXTENSION_MODULES:
+        try:
+            return importlib.import_module(name)
+        except ModuleNotFoundError as e:
+            if e.name != name:  # a missing parent (no vLLM at all) is not a different layout
+                raise
+    raise ModuleNotFoundError(f"vLLM has none of {VERIFY_EXTENSION_MODULES}", name=VERIFY_EXTENSION_MODULES[0])
 
 
 HOOK_MAP: Tuple[HookUse, ...] = (
@@ -55,7 +74,7 @@ HOOK_MAP: Tuple[HookUse, ...] = (
     ),
     HookUse(
         "H10 GDN tree verify of the spec-decode rows",
-        "vllm.model_executor.layers.mamba.gdn.verify_extension:LinearAttnVerifyExtension.forward_spec_rows",
+        " | ".join(f"{m}:LinearAttnVerifyExtension.forward_spec_rows" for m in VERIFY_EXTENSION_MODULES),
         "gpu",
     ),
     HookUse(
@@ -77,6 +96,10 @@ def missing_hooks() -> list[str]:
 
 
 def _exists(path: str) -> bool:
+    return any(_exists_one(alternative.strip()) for alternative in path.split("|"))
+
+
+def _exists_one(path: str) -> bool:
     module_name, _, attr_path = path.partition(":")
     try:
         obj = importlib.import_module(module_name)

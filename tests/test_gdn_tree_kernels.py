@@ -226,9 +226,7 @@ def test_spec_rows_read_the_packed_projection_in_place_and_write_the_layer_outpu
     from types import SimpleNamespace
 
     pytest.importorskip("vllm")
-    from vllm.model_executor.layers.mamba.gdn.verify_extension import GDNSpecRows
-
-    from eagle_harness.vllm.gdn_tree_verify import TreeVerify
+    from eagle_harness.vllm.gdn_tree_verify import GDNSpecRows, TreeVerify
     from eagle_harness.vllm.verify_layout import set_stage
 
     torch.manual_seed(3)

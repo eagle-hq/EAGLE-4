@@ -58,7 +58,8 @@ def test_register_adds_the_method(registered):
     assert registered.speculator_cls == "eagle_harness.vllm.speculator:HarnessSpeculator"
     assert registered.uses_target_hidden_states is True
     assert registered.uses_aux_hidden_states is True
-    assert registered.supports_async_scheduling is True
+    if "supports_async_scheduling" in vllm_registry.SpeculativeMethodSpec.__dataclass_fields__:  # 0.1.0 engine
+        assert registered.supports_async_scheduling is True
     assert registered.configure is not None
     assert registered.num_lookahead_tokens is num_lookahead_tokens
     assert registered.linear_attn_verify_extension == "eagle_harness.vllm.gdn_tree_verify:create_extension"
@@ -344,8 +345,8 @@ def test_lookahead_reaches_the_vllm_config(registered):
     assert VllmConfig.num_lookahead_tokens.fget(fake) == 96
 
 
-def test_the_method_name_is_unknown_before_the_plugin_runs():
-    vllm_registry.unregister_speculative_method(METHOD_NAME)
+def test_the_method_name_is_unknown_before_the_plugin_runs(monkeypatch):
+    monkeypatch.delitem(vllm_registry._REGISTRY, METHOD_NAME, raising=False)
     with pytest.raises(ValueError, match="Unknown speculative method"):
         SpeculativeConfig(method=METHOD_NAME, method_config=STATIC)
 
@@ -377,6 +378,40 @@ def test_register_refuses_a_vllm_without_a_mapped_hook(monkeypatch):
     assert "Fix: install vllm with the eagle-harness hooks" in message
 
 
+@pytest.mark.parametrize("layout", [0, 1], ids=["review-head", "release-0.1.0"])
+def test_verify_extension_module_follows_the_engine_layout(monkeypatch, layout):
+    import types
+
+    from eagle_harness.vllm import adapter
+
+    present = types.ModuleType(adapter.VERIFY_EXTENSION_MODULES[layout])
+    for i, name in enumerate(adapter.VERIFY_EXTENSION_MODULES):
+        monkeypatch.setitem(sys.modules, name, present if i == layout else None)  # None: import raises
+    assert adapter.verify_extension_module() is present
+
+
+def test_verify_extension_hook_counts_either_layout(monkeypatch):
+    from eagle_harness.vllm import adapter
+
+    (hook,) = [use.hook for use in HOOK_MAP if "LinearAttnVerifyExtension" in use.hook]
+    for layout in adapter.VERIFY_EXTENSION_MODULES:
+        monkeypatch.setattr(adapter, "_exists_one", lambda path, layout=layout: path.startswith(layout + ":"))
+        assert adapter._exists(hook)
+    monkeypatch.setattr(adapter, "_exists_one", lambda path: False)
+    assert not adapter._exists(hook)
+
+
+@pytest.mark.parametrize("has_field", [True, False], ids=["release-0.1.0", "review-head"])
+def test_async_scheduling_opt_in_only_where_the_engine_has_the_field(has_field):
+    import dataclasses
+
+    fields = [("speculator_cls", str)] + ([("supports_async_scheduling", bool, False)] if has_field else [])
+    spec_cls = dataclasses.make_dataclass("Spec", fields)
+    opt_in = plugin._async_scheduling_opt_in(spec_cls)
+    assert opt_in == ({"supports_async_scheduling": True} if has_field else {})
+    spec_cls("x", **opt_in)  # the engine's spec accepts what the plugin passes
+
+
 def test_hook_map_statuses_are_known():
     assert {use.status for use in HOOK_MAP} == {"cpu", "gpu", "none"}
     assert all(not use.hook for use in HOOK_MAP if use.status == "none")
@@ -396,9 +431,10 @@ def test_speculator_hooks_match_the_vllm_signatures(name):
 
 
 def test_gdn_extension_factory_follows_the_mode():
-    from vllm.model_executor.layers.mamba.gdn.verify_extension import LinearAttnVerifyExtension
-
+    from eagle_harness.vllm.adapter import verify_extension_module
     from eagle_harness.vllm.gdn_tree_verify import TreeVerify, create_extension
+
+    LinearAttnVerifyExtension = verify_extension_module().LinearAttnVerifyExtension
 
     def config(method_config):
         return SimpleNamespace(speculative_config=SimpleNamespace(method_config=method_config))
@@ -412,10 +448,9 @@ def test_tree_mode_refuses_linear_layers_the_extension_cannot_reach(monkeypatch)
     """A Mamba2 layer reaches the tree verify only through vLLM's Mamba2 hook; without it (or for any other linear
     layer) vLLM's kernels would verify every tree as a chain, so the speculator refuses the target."""
     from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
-    from vllm.model_executor.layers.mamba.gdn.verify_extension import LinearAttnVerifyExtension
     from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 
-    from eagle_harness.vllm.gdn_tree_verify import check_tree_verifiable
+    from eagle_harness.vllm.gdn_tree_verify import LinearAttnVerifyExtension, check_tree_verifiable
 
     gdn, mamba2 = object.__new__(QwenGatedDeltaNetAttention), object.__new__(MambaMixer2)
     check_tree_verifiable([gdn, gdn])

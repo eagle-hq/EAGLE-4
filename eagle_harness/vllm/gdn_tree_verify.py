@@ -35,15 +35,18 @@ import torch
 import triton
 import triton.language as tl
 
-from vllm.model_executor.layers.mamba.gdn.verify_extension import GDNSpecRows, LinearAttnVerifyExtension
-
+from eagle_harness.vllm.adapter import verify_extension_module
 from eagle_harness.kernels.gdn_tree_conv import gdn_tree_conv1d_update
 from eagle_harness.kernels.gdn_tree_recurrence import gdn_tree_recurrent_update
 from eagle_harness.kernels.mamba2_tree import mamba2_tree_state_update
 from eagle_harness.vllm.verify_layout import VerifyStage, get_stage
 
 if TYPE_CHECKING:  # vLLM builds without the Mamba2 hook lack it; the speculator refuses Mamba2 targets there
-    from vllm.model_executor.layers.mamba.gdn.verify_extension import Mamba2SpecRows
+    from vllm.model_executor.layers.mamba.verify_extension import Mamba2SpecRows
+
+_verify_extension = verify_extension_module()
+GDNSpecRows = _verify_extension.GDNSpecRows
+LinearAttnVerifyExtension = _verify_extension.LinearAttnVerifyExtension
 
 # A padded request's state slot; the chain kernels skip it too.
 NULL_BLOCK_ID = tl.constexpr(0)

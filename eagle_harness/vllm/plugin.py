@@ -48,8 +48,8 @@ def register() -> bool:
             uses_target_hidden_states=True,
             uses_aux_hidden_states=True,
             num_lookahead_tokens=num_lookahead_tokens,
-            supports_async_scheduling=True,  # a round is device-only: no host read between verify and the next drafts
             linear_attn_verify_extension=GDN_TREE_VERIFY,
+            **_async_scheduling_opt_in(SpeculativeMethodSpec),
         ),
     )
 
@@ -65,6 +65,15 @@ def register() -> bool:
         ModelRegistry.register_model("Eagle3ForHarness", "eagle_harness.vllm.eagle3:Eagle3ForHarness")
     logger.info("eagle-harness: registered speculative method %s and draft %s", METHOD_NAME, DRAFT_ARCHITECTURE)
     return True
+
+
+def _async_scheduling_opt_in(spec_cls: type) -> dict:
+    """The 0.1.0 release engine runs a registered method with async scheduling only when the spec opts in; later
+    engines dropped the field (async scheduling no longer depends on the method). A round is device-only: no host
+    read between verify and the next drafts."""
+    if "supports_async_scheduling" in getattr(spec_cls, "__dataclass_fields__", {}):
+        return {"supports_async_scheduling": True}
+    return {}
 
 
 def _log_through_vllm() -> None:
