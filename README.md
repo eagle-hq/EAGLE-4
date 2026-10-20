@@ -69,7 +69,7 @@ The patched engines ship as pinned wheels and container images, not as source tr
 | Engine | Hardware | Wheel index | Image | Source |
 | --- | --- | --- | --- | --- |
 | SGLang | NVIDIA B300, CUDA 13.0 | [cu130](https://eagle-hq.github.io/EAGLE-4/whl/cu130/) | `ghcr.io/eagle-hq/eagle-4-sglang:0.1.0` | [eagle-hq/sglang](https://github.com/eagle-hq/sglang) |
-| SGLang | AMD MI355X, ROCm 7.2 | [rocm](https://eagle-hq.github.io/EAGLE-4/whl/rocm/) | `ghcr.io/eagle-hq/eagle-4-sglang-rocm:0.1.0` | [eagle-hq/sglang](https://github.com/eagle-hq/sglang) |
+| SGLang | AMD MI355X, ROCm 7.2 | [rocm](https://eagle-hq.github.io/EAGLE-4/whl/rocm/) | not yet published ([build it](docs/install.md#build-the-rocm-image)) | [eagle-hq/sglang](https://github.com/eagle-hq/sglang) |
 | vLLM | NVIDIA B300, CUDA 13.0 | [cu130](https://eagle-hq.github.io/EAGLE-4/whl/cu130/) | `ghcr.io/eagle-hq/eagle-4-vllm:0.1.0` | [eagle-hq/vllm](https://github.com/eagle-hq/vllm) |
 | TokenSpeed, experimental | NVIDIA CUDA only | [cu130](https://eagle-hq.github.io/EAGLE-4/whl/cu130/) | `ghcr.io/eagle-hq/eagle-4-tokenspeed:0.1.0` | [eagle-hq/tokenspeed](https://github.com/eagle-hq/tokenspeed) |
 
