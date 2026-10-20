@@ -1,0 +1,25 @@
+{
+  "files": [
+    {
+      "path": "eagle_harness/kernels/gdn_tree_chunk_flydsl.py",
+      "notice": "# Copyright (c) 2026 Advanced Micro Devices, Inc.\n# SPDX-License-Identifier: Apache-2.0\n",
+      "modified": true,
+      "absent_in_baseline": true
+    },
+    {
+      "path": "eagle_harness/kernels/gdn_tree_records.py",
+      "notice": "# Copyright (c) 2026 Advanced Micro Devices, Inc.\n# SPDX-License-Identifier: Apache-2.0\n",
+      "modified": true,
+      "absent_in_baseline": true
+    },
+    {
+      "path": "eagle_harness/sglang/gdn_tree_verify.py",
+      "notice": "# Copyright (c) 2026 Advanced Micro Devices, Inc.\n# SPDX-License-Identifier: Apache-2.0\n",
+      "modified": true,
+      "first_party_sha256": [
+        "7acb5a5a11dcd22eb67e295c0d1afd745c2f29a2be681ca691e48dd105f60406",
+        "7acb5a5a11dcd22eb67e295c0d1afd745c2f29a2be681ca691e48dd105f60406"
+      ]
+    }
+  ]
+}

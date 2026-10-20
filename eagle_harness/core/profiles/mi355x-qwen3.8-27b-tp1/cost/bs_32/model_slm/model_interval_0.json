@@ -1,0 +1,17 @@
+{
+  "value": [
+    1171.4680194854736
+  ],
+  "ratio": [
+    1.0
+  ],
+  "index": [
+    0
+  ],
+  "array_query": [],
+  "array_cache": [],
+  "cache_length_start": 1024,
+  "cache_length_step": 1024,
+  "max_query_length_query": 1,
+  "max_query_length_cache": 1
+}

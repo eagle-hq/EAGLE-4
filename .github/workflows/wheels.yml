@@ -1,0 +1,86 @@
+# Build the sdist, the binary wheel and the pure wheel with tools/build_wheel.sh, then check them (twine check and
+# tools/check_dist.py: name, version, extras, entry points, contents, license state). Nothing is uploaded here: the
+# files are a workflow artifact; publish.yml and the source repo's release workflow call this workflow.
+#
+# The binary wheel carries the native candidate-head library prebuilt for CUDA 12.9 and 13.0
+# (eagle_harness/kernels/build.py), so `pip install` needs no nvcc; the sdist and the pure wheel build it on first use.
+name: wheels
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - pyproject.toml
+      - setup.py
+      - MANIFEST.in
+      - LICENSE
+      - NOTICE
+      - TRADEMARKS.md
+      - THIRD_PARTY_NOTICES.md
+      - LICENSES/**
+      - README.md
+      - eagle_harness/__init__.py
+      - eagle_harness/kernels/build.py
+      - eagle_harness/kernels/csrc/**
+      - tools/build_wheel.sh
+      - tools/check_dist.py
+      - .github/workflows/wheels.yml
+  pull_request:
+    paths:
+      - pyproject.toml
+      - setup.py
+      - MANIFEST.in
+      - LICENSE
+      - NOTICE
+      - TRADEMARKS.md
+      - THIRD_PARTY_NOTICES.md
+      - LICENSES/**
+      - README.md
+      - eagle_harness/__init__.py
+      - eagle_harness/kernels/build.py
+      - eagle_harness/kernels/csrc/**
+      - tools/build_wheel.sh
+      - tools/check_dist.py
+      - .github/workflows/wheels.yml
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "git ref to build; empty: the commit that triggered the caller"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: CUDA 12.9 and 13.0 compilers (nvcc and the static runtime only)
+        run: |
+          curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            cuda-nvcc-12-9 cuda-cudart-dev-12-9 cuda-nvcc-13-0 cuda-cudart-dev-13-0
+      - run: python -m pip install build auditwheel patchelf twine
+      - run: bash tools/build_wheel.sh . dist /usr/local/cuda-12.9 /usr/local/cuda-13.0
+      - name: Build log (toolkits, glibc symbols, wheel contents)
+        if: always()
+        run: cat dist/build.txt || true
+      - run: python -m twine check --strict dist/*.tar.gz dist/*.whl dist/pure/*.whl
+      - run: python tools/check_dist.py dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: dist
+          path: dist
+          retention-days: 14

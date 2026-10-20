@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]  # license-files (PEP 639)
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eagle-harness"
+version = "0.1.0"
+description = "EAGLE-Harness: cost-model-driven dynamic-tree speculative decoding (out-of-tree sglang, vLLM and TokenSpeed plugin)"
+readme = "README.md"
+license = "LicenseRef-Eagle-4-Source-Available"
+license-files = ["LICENSE", "NOTICE", "TRADEMARKS.md", "THIRD_PARTY_NOTICES.md", "LICENSES/*.txt"]
+requires-python = ">=3.10"
+dependencies = ["numpy", "packaging", "torch"]
+
+[project.optional-dependencies]
+# No host release has the hooks yet (sglang v0.5.22 and vLLM v0.32.0 are the last without them);
+# eagle_harness/compat.py keeps the same ranges and checks the hooks at load time. FlashInfer 0.7.2 adds the public
+# variant API the sglang tree-tail mask verify uses (jit_args, variant_owns_mask).
+sglang = ["sglang>=0.5.23.dev0,<0.6", "flashinfer-python>=0.7.2"]
+vllm = ["vllm>=0.32.0rc1.dev283,!=0.32.0"]
+# TokenSpeed needs the release build with eagle-harness plugin hooks; see docs/install.md.
+tokenspeed = ["tokenspeed>=0.1.1,<0.2"]
+test = ["pytest", "scipy"]
+
+[project.scripts]
+eagle-harness = "eagle_harness.cli:main"
+eagle-harness-check = "eagle_harness.compat:main"
+
+# sglang's general plugin group: load_plugins() calls this in every sglang
+# process; it registers the EAGLE_HARNESS algorithm and the EAGLE-4 draft model.
+[project.entry-points."sglang.srt.plugins"]
+eagle_harness = "eagle_harness.sglang.plugin:register"
+
+# vLLM's general plugin group: load_general_plugins() calls this in every vLLM
+# process; it registers the eagle_harness speculative method and the EAGLE-4
+# draft architecture (needs vLLM with the speculative-method registry hooks).
+[project.entry-points."vllm.general_plugins"]
+eagle_harness = "eagle_harness.vllm.plugin:register"
+
+# TokenSpeed's runtime plugin group: tokenspeed.runtime.plugins.ensure_loaded() calls this in every TokenSpeed
+# process; it registers the EAGLE_HARNESS drafter and the EAGLE-4 draft architecture (requires the runtime plugin hooks).
+[project.entry-points."tokenspeed.plugins"]
+eagle_harness = "eagle_harness.tokenspeed.plugin:register"
+
+[tool.setuptools.packages.find]
+include = ["eagle_harness*"]
+
+[tool.setuptools.package-data]
+"eagle_harness.core" = ["*.csv", "profiles/**/*.json", "profiles/**/*.csv", "profiles/**/*.md"]
+"eagle_harness.kernels" = ["csrc/*.cu", "_native/*/*.so"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: nvcc compile of the native library for every architecture (a few minutes)"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["eagle_harness/kernels/candidate_triton.py", "eagle_harness/kernels/gdn_tree_gluon.py"]

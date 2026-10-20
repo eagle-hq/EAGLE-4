@@ -1,0 +1,60 @@
+# Copyright 2026 Eagle AI Corp.
+# SPDX-License-Identifier: LicenseRef-Eagle-4-Source-Available
+
+name: publish-engines
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Published release whose engine assets replace the channel indices"
+        type: choice
+        options: [v0.1.0]
+        default: v0.1.0
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'eagle-hq/EAGLE-4'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b  # v5
+      - name: Download release wheels and verify both channel manifests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: python tools/engine_release.py pages "$RELEASE_TAG" _site
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b  # v4
+        with:
+          path: _site
+          retention-days: 7
+
+  deploy:
+    if: github.repository == 'eagle-hq/EAGLE-4'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy the wheel-free index
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e  # v4

@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.so binary
+*.whl binary
+*.pdf binary
+tests/golden/*.json linguist-generated=true

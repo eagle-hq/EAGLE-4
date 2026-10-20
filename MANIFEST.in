@@ -1,0 +1,8 @@
+# The sdist is the source: the prebuilt native libraries go into the wheel only (tools/build_wheel.sh).
+include LICENSE NOTICE TRADEMARKS.md README.md THIRD_PARTY_NOTICES.md
+recursive-include LICENSES *.txt
+recursive-include eagle_harness/core *.csv
+recursive-include eagle_harness/kernels/csrc *.cu
+graft tests
+prune eagle_harness/kernels/_native
+global-exclude __pycache__ *.py[cod] *.so

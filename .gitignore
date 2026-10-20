@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.egg-info/
+build/
+.pytest_cache/
+REVISION
+eagle_harness/kernels/_native/
+.docker-release/
+eagle-calibration-*/

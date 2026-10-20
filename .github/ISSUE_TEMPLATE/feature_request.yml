@@ -1,0 +1,16 @@
+name: Feature request
+description: Support for a model, engine version, GPU or feature.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you need and why
+      description: The model, engine, hardware or feature, and what it would let you do.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      description: Commands, error messages or measurements, if any.

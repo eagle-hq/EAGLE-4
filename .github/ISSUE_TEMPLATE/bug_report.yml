@@ -1,0 +1,46 @@
+name: Bug report
+description: Something fails, gives wrong output or is slower than it should be.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what happened instead. Paste the full error.
+    validations:
+      required: true
+  - type: textarea
+    id: check
+    attributes:
+      label: eagle-harness-check output
+      description: Output of `eagle-harness-check --kernels`.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Server command and config
+      description: The full launch command, including the `--speculative-algorithm-config` or `--speculative-config` JSON.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Target and draft models
+      placeholder: Qwen3.8-27B with its EAGLE-4 draft
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: GPUs, tensor-parallel size, CUDA and driver versions
+      placeholder: 4x B300, TP4, CUDA 13.0, driver 580
+    validations:
+      required: true
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: Workload, batch size, logs, or a measurement against a server without speculation.

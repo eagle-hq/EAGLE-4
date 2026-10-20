@@ -1,0 +1,165 @@
+{
+ "rounds": [
+  {
+   "batch_size": 1,
+   "width": 4,
+   "round_us": 5120.3,
+   "accept": 3.3947,
+   "count": 76
+  },
+  {
+   "batch_size": 1,
+   "width": 16,
+   "round_us": 5809.0,
+   "accept": 8.6774,
+   "count": 31
+  },
+  {
+   "batch_size": 11,
+   "width": 4,
+   "round_us": 7421.9,
+   "accept": 2.4949,
+   "count": 9
+  },
+  {
+   "batch_size": 12,
+   "width": 16,
+   "round_us": 12275.6,
+   "accept": 3.0926,
+   "count": 18
+  },
+  {
+   "batch_size": 13,
+   "width": 4,
+   "round_us": 7930.6,
+   "accept": 2.4038,
+   "count": 16
+  },
+  {
+   "batch_size": 15,
+   "width": 4,
+   "round_us": 7935.9,
+   "accept": 2.45,
+   "count": 8
+  },
+  {
+   "batch_size": 16,
+   "width": 4,
+   "round_us": 8105.2,
+   "accept": 2.4922,
+   "count": 8
+  },
+  {
+   "batch_size": 17,
+   "width": 16,
+   "round_us": 14305.6,
+   "accept": 3.0462,
+   "count": 14
+  },
+  {
+   "batch_size": 20,
+   "width": 4,
+   "round_us": 8547.9,
+   "accept": 2.5269,
+   "count": 39
+  },
+  {
+   "batch_size": 20,
+   "width": 16,
+   "round_us": 16699.9,
+   "accept": 3.475,
+   "count": 10
+  },
+  {
+   "batch_size": 21,
+   "width": 4,
+   "round_us": 8746.3,
+   "accept": 2.5801,
+   "count": 11
+  },
+  {
+   "batch_size": 21,
+   "width": 16,
+   "round_us": 18104.6,
+   "accept": 3.9194,
+   "count": 13
+  },
+  {
+   "batch_size": 22,
+   "width": 4,
+   "round_us": 8854.0,
+   "accept": 2.5511,
+   "count": 8
+  },
+  {
+   "batch_size": 23,
+   "width": 4,
+   "round_us": 8904.4,
+   "accept": 2.5942,
+   "count": 9
+  },
+  {
+   "batch_size": 25,
+   "width": 4,
+   "round_us": 9631.1,
+   "accept": 2.5867,
+   "count": 9
+  },
+  {
+   "batch_size": 31,
+   "width": 4,
+   "round_us": 10255.2,
+   "accept": 2.6452,
+   "count": 8
+  },
+  {
+   "batch_size": 32,
+   "width": 4,
+   "round_us": 10252.4,
+   "accept": 2.7585,
+   "count": 11
+  },
+  {
+   "batch_size": 36,
+   "width": 4,
+   "round_us": 11012.5,
+   "accept": 2.5625,
+   "count": 8
+  },
+  {
+   "batch_size": 43,
+   "width": 4,
+   "round_us": 12079.5,
+   "accept": 2.7419,
+   "count": 10
+  },
+  {
+   "batch_size": 51,
+   "width": 4,
+   "round_us": 13998.0,
+   "accept": 2.7603,
+   "count": 9
+  },
+  {
+   "batch_size": 54,
+   "width": 4,
+   "round_us": 14536.4,
+   "accept": 2.8045,
+   "count": 9
+  },
+  {
+   "batch_size": 64,
+   "width": 4,
+   "round_us": 13935.5,
+   "accept": 2.8166,
+   "count": 392
+  },
+  {
+   "batch_size": 64,
+   "width": 16,
+   "round_us": 36474.5,
+   "accept": 4.9238,
+   "count": 119
+  }
+ ]
+}

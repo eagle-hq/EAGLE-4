@@ -1,0 +1,118 @@
+# Copyright 2026 Eagle AI Corp.
+# SPDX-License-Identifier: LicenseRef-Eagle-4-Source-Available
+
+name: publish-images
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release source and image version; deploy its Pages index first"
+        type: choice
+        options: [v0.1.0]
+        default: v0.1.0
+        required: true
+      rocm_base_image:
+        description: "Approved Python 3.10 / ROCm 7.2 MI355X base image pinned by @sha256"
+        type: string
+        required: true
+      tokenspeed_base_image:
+        description: "Approved Python 3.12 / CUDA 13.0 TokenSpeed base image pinned by @sha256"
+        type: string
+        required: true
+      runner:
+        description: "Approved larger GitHub-hosted Linux x64 runner label (enough disk for base images and build layers)"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-images
+  cancel-in-progress: false
+
+jobs:
+  images:
+    if: github.repository == 'eagle-hq/EAGLE-4'
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: sglang
+            channel: cu130
+            base_image: ""
+          - engine: sglang-rocm
+            channel: rocm
+            base_image: ${{ inputs.rocm_base_image }}
+          - engine: vllm
+            channel: cu130
+            base_image: ""
+          - engine: tokenspeed
+            channel: cu130
+            base_image: ${{ inputs.tokenspeed_base_image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag }}
+          persist-credentials: false
+      - name: Check the published index and Dockerfile contract
+        env:
+          ENGINE: ${{ matrix.engine }}
+          CHANNEL: ${{ matrix.channel }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          BASE_IMAGE: ${{ matrix.base_image }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RELEASE_TAG" = v0.1.0
+          test "$(uname -m)" = x86_64
+          docker info
+          docker buildx version
+          df -h
+          test -f "docker/$ENGINE.Dockerfile"
+          . ./docs/release.env
+          test "$EAGLE_VERSION" = "${RELEASE_TAG#v}"
+          test "$EAGLE_CUDA_INDEX" = https://eagle-hq.github.io/EAGLE-4/whl/cu130/
+          test "$EAGLE_ROCM_INDEX" = https://eagle-hq.github.io/EAGLE-4/whl/rocm/
+          if [[ "$ENGINE" == sglang-rocm || "$ENGINE" == tokenspeed ]]; then
+            [[ "$BASE_IMAGE" =~ ^[^[:space:]]+@sha256:[a-f0-9]{64}$ ]]
+          fi
+          curl --fail --silent --show-error --retry 3 \
+            "https://eagle-hq.github.io/EAGLE-4/whl/$CHANNEL/SHA256SUMS"
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_USER: ${{ github.actor }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin
+      - name: Build, check and push the release image
+        env:
+          ENGINE: ${{ matrix.engine }}
+          CHANNEL: ${{ matrix.channel }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          BASE_IMAGE: ${{ matrix.base_image }}
+        run: |
+          image="ghcr.io/eagle-hq/eagle-4-$ENGINE:${RELEASE_TAG#v}"
+          bash tools/check_image_tag.sh "$image"
+          build_args=()
+          if [ -n "$BASE_IMAGE" ]; then
+            build_args+=(--build-arg "BASE_IMAGE=$BASE_IMAGE")
+          fi
+          docker build --pull --platform linux/amd64 "${build_args[@]}" \
+            --file "docker/$ENGINE.Dockerfile" \
+            --label "org.opencontainers.image.source=https://github.com/eagle-hq/EAGLE-4" \
+            --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
+            --label "org.opencontainers.image.version=${RELEASE_TAG#v}" \
+            --tag "$image" .
+          docker run --rm --entrypoint eagle-harness "$image" calibrate --help
+          bash tools/check_image_tag.sh "$image"
+          docker push "$image"
+          docker buildx imagetools inspect "$image"
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io

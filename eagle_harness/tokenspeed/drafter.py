@@ -1,0 +1,183 @@
+# Copyright 2026 Eagle AI Corp.
+# SPDX-License-Identifier: LicenseRef-Eagle-4-Source-Available
+
+"""``HarnessDrafter``: EAGLE-Harness as a TokenSpeed drafter (algorithm ``EAGLE_HARNESS``).
+
+A round is TokenSpeed's EAGLE tree round (``Eagle``: the draft extend over the accepted rows, then ``S - 1`` lane
+forwards of ``K`` rows per request, all inside TokenSpeed's decode graph) with the harness's own tree policy in place
+of TokenSpeed's:
+
+- the EAGLE-4 candidate head ranks each row's next tokens (:meth:`LlamaForCausalLMEagle4.candidate_topk`; no
+  whole-vocab LM head per draft step);
+- the core :class:`~eagle_harness.core.draft_tree.DraftTree` (shared with the sglang and vLLM adapters) scores the
+  nodes, keeps the frontier and picks the ``N - 1`` verify nodes (:meth:`DraftTree.verify_rows`), so the tree verified
+  for the same draft outputs is the one the other engines verify;
+- :mod:`~eagle_harness.tokenspeed.tree_lanes` turns the frontier choices into TokenSpeed's lane masks and the verify
+  window and parents TokenSpeed verifies with its own tree attention and GDN tree verify.
+
+Static rounds use Eagle's complete graph. Serve rounds delegate chain/tree execution, fixed-ahead sampled-depth
+planning and recorded-q rejection to the engine. Cost decisions come only from eagle_harness.core; native EAGLE-3
+and reduced-vocabulary maps stay owned by TokenSpeed.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import replace
+from typing import Any
+
+import torch
+from tokenspeed.runtime.execution.drafter.tree_round.device_policy import DevicePolicy
+from tokenspeed.runtime.execution.drafter.tree_round.dynamic import DynamicDrafter
+from tokenspeed.runtime.models.llama_eagle3 import LlamaForCausalLMEagle3
+from typing_extensions import override
+
+from eagle_harness.core.config import DraftFamily, Mode, build_cost_model
+from eagle_harness.core.draft_tree import DraftTree, TreeShape
+from eagle_harness.core.limits import ComputeIntensity
+from eagle_harness.tokenspeed.config import ALGORITHM_NAME, STATIC, TokenSpeedConfig, parse_algorithm_config
+from eagle_harness.tokenspeed.costs import tree_policy_costs
+from eagle_harness.tokenspeed.models import CandidateRows, LlamaForCausalLMEagle4
+from eagle_harness.tokenspeed.tree_lanes import advance_lane_masks, lane_bits, seed_lane_masks, verify_window
+
+
+class HarnessDrafter(DynamicDrafter):
+    supports_speculative_sampling = True
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        model = self.draft_model_runner.model
+        if not isinstance(model, LlamaForCausalLMEagle3):
+            raise TypeError(f"{ALGORITHM_NAME} requires an EAGLE-3 or EAGLE-4 draft, got {type(model)}")
+        self.draft_model = model
+        self.config: TokenSpeedConfig = STATIC
+        self.tree: DraftTree | None = None
+        self._lane_bits: torch.Tensor | None = None
+
+    def configure_algorithm(self, algorithm_config: Mapping[str, Any]) -> None:
+        self.config = parse_algorithm_config(algorithm_config)
+        if isinstance(self.draft_model, LlamaForCausalLMEagle4):
+            self.draft_model.cuda_candidate_kernels = self.config.draft_model.cuda_candidate_kernels
+        elif "draft_family" not in algorithm_config:
+            self.config = replace(self.config, draft_family=DraftFamily.EAGLE3)
+
+    @override
+    def wire_target(self, target: Any) -> None:
+        super().wire_target(target)
+        expert_counts = (
+            getattr(target.config, name, 0) for name in ("num_experts", "num_local_experts", "n_routed_experts")
+        )
+        self._target_is_moe = any(expert_counts)
+
+    @property
+    def dynamic(self) -> bool:
+        return self.config.mode is Mode.SERVE
+
+    def _make_policy(self, verify_num: int, topk: int, depth: int) -> DevicePolicy:
+        fully_scheduled = bool(self.config.chain_width_table and self.config.chain_width_table[0][0] == 1)
+        model = None if fully_scheduled else build_cost_model(
+            self.config,
+            node_top_k=topk,
+            tree_depth=depth,
+            verify_num=verify_num,
+            target_is_moe=self._target_is_moe,
+        )
+        costs = None
+        if model is not None:
+            costs = model.chain_policy_costs() if self.config.intensity is ComputeIntensity.CHAIN else tree_policy_costs(model)
+        return DevicePolicy(
+            costs,
+            verify_num=verify_num,
+            node_top_k=topk,
+            tree_depth=depth,
+            compute_intensity=self.config.intensity.value,
+            is_moe_target=self._target_is_moe,
+            exec_mode=0,
+            chain_width_table=self.config.chain_width_table,
+            device=self.device,
+        )
+
+    @override
+    def bind_tree(self, tree_spec: Any) -> None:
+        if self.dynamic:
+            shape = tree_spec.config
+            self.bind_dynamic_tree(tree_spec, self._make_policy(shape.num_nodes, shape.topk, shape.num_steps))
+            if self._sampling_backend.config.enable_speculative_sampling:
+                self.enable_sampled_trees(
+                    num_candidates=(self.draft_model.num_candidates if isinstance(self.draft_model, LlamaForCausalLMEagle4)
+                                    else min(1024, getattr(self.draft_model.config, "draft_vocab_size", None) or self.draft_model.config.vocab_size)),
+                    seed=self._sampling_backend.config.random_seed,
+                )
+            return
+        if self._sampling_backend.config.enable_speculative_sampling:
+            raise ValueError("recorded-q proposals require serve mode; static trees support target sampling")
+        super().bind_tree(tree_spec)
+        config = tree_spec.config
+        if config.num_steps < 2:
+            raise ValueError(f"{ALGORITHM_NAME} needs --speculative-num-steps >= 2, got {config.num_steps}")
+        shape = TreeShape(top_k=config.topk, max_depth=config.num_steps)
+        if config.num_nodes - 1 > shape.num_nodes(config.num_steps):
+            raise ValueError(
+                f"--speculative-num-draft-tokens {config.num_nodes} verifies more nodes than a tree of depth "
+                f"{config.num_steps} and top-k {config.topk} holds ({shape.num_nodes(config.num_steps)} + the root)"
+            )
+        self.tree = DraftTree(
+            shape,
+            self.input_buffers.max_bs,
+            self.draft_model.config.hidden_size,
+            self.draft_model_runner.model_config.dtype,
+            self.device,
+            max_verify=1,
+            delta_slots=(),  # the work deltas are the cost model's input; the static tree does not read them
+        )
+        self._lane_bits = lane_bits(config.topk, config.num_steps, self.device)
+
+    @override
+    def run(self, base_ctx: Any, logits_output: Any, output_tokens: torch.Tensor, accept_lengths: torch.Tensor):
+        if self.tree_lanes is None:
+            raise NotImplementedError(
+                f"{ALGORITHM_NAME} requires an engine that binds explicit draft ancestry, including chains"
+            )
+        return super().run(base_ctx, logits_output, output_tokens, accept_lengths)
+
+    # ------------------------------------------------------------------ the tree policy
+    def _candidates(self, rows: CandidateRows) -> tuple[torch.Tensor, torch.Tensor]:
+        if isinstance(self.draft_model, LlamaForCausalLMEagle4):
+            if self.sampled_trees:
+                rows.next_token_logits, rows.candidate_ids, topk = self.draft_model.candidate_head(
+                    rows.normed, self.lanes_per_request
+                )
+                return topk
+            return self.draft_model.candidate_topk(rows.normed, self.lanes_per_request)
+        return super()._candidates(rows)
+
+    @override
+    def _seed_tree_lanes(self, bs: int, logits_output: CandidateRows, frontier: torch.Tensor):
+        """Depth 1 from the draft extend's candidates; returns the lanes' ``[bs, K]`` tokens and ``[bs * K, H]`` rows."""
+        tree, k = self.tree, self.lanes_per_request
+        probs, tokens = self._candidates(logits_output)
+        tree.stage_root(bs, probs, tokens, logits_output.hidden_states)
+        tree.begin(bs)
+        seed_lane_masks(self.tree_lanes.lane_mask, bs, self._lane_bits)
+        self.tree_lanes.set_frontier(bs, frontier)
+        return tree.front_tokens[: bs * k].view(bs, k), tree.front_hidden[: bs * k]
+
+    @override
+    def _expand_tree_lanes(self, bs: int, step: int, logits_output: CandidateRows):
+        """Children of the depth-``step`` lanes; returns the next lanes' tokens and rows (``None`` after the last step)."""
+        tree, k = self.tree, self.lanes_per_request
+        probs, tokens = self._candidates(logits_output)
+        tree.step(bs, step, probs, tokens, logits_output.hidden_states)
+        lanes = tree.front_tokens[: bs * k].view(bs, k)
+        if step == self.spec_num_steps - 1:
+            return lanes, None
+        advance_lane_masks(tree, self.tree_lanes.lane_mask, bs, step, self._lane_bits)
+        return lanes, tree.front_hidden[: bs * k]
+
+    @override
+    def _draft_window(self, bs: int, next_tokens: torch.Tensor) -> torch.Tensor:
+        """The best ``N - 1`` nodes and the root as next round's verify window; their parents into the tree spec."""
+        verify_window(
+            self.tree, bs, self.spec_num_steps, next_tokens[:, 0], next_tokens, self.tree_spec.draft_parent_buf[:bs]
+        )
+        return next_tokens
