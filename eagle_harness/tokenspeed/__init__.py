@@ -14,4 +14,6 @@ Modules (``cpu`` = tested without a GPU, ``gpu`` = tested on a GPU):
 - ``tree_lanes``  cpu  the core draft tree in TokenSpeed's terms: lane masks, verify window and parents
 - ``drafter``     gpu  ``HarnessDrafter``: TokenSpeed's EAGLE tree round with the core tree and the candidate head
 - ``models``      gpu  the EAGLE-4 draft model for TokenSpeed (candidate head, no whole-vocab LM head per step)
+- ``measurement`` gpu  calibrate mode: measured round widths and the stage samples of a tree's cost tables
+- ``calibrate``   gpu  the calibration driver: measured rounds, attention sweeps and the core fits
 """

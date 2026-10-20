@@ -45,10 +45,24 @@ def test_serve_uses_device_policy_with_calibration():
     assert config.mode is Mode.SERVE and config.cost_dir == "/calibration/cost"
 
 
-@pytest.mark.parametrize("mode", ["eval", "calibrate"])
-def test_unsupported_cost_model_modes_are_refused(mode):
-    with pytest.raises(NotImplementedError, match="static and serve"):
-        parse_algorithm_config({"mode": mode, "data_path": "/nonexistent"})
+def test_eval_mode_is_refused():
+    with pytest.raises(NotImplementedError, match="static, serve and calibrate"):
+        parse_algorithm_config({"mode": "eval", "data_path": "/nonexistent"})
+
+
+def test_calibrate_measures_a_tree_into_its_data_path():
+    config = parse_algorithm_config({"mode": "calibrate", "intensity": "low_intensity", "data_path": "/calibration"})
+    assert config.mode is Mode.CALIBRATE and config.data_path == "/calibration"
+
+
+def test_calibrate_needs_a_data_path():
+    with pytest.raises(ValueError, match="calibrate mode needs data_path"):
+        parse_algorithm_config({"mode": "calibrate"})
+
+
+def test_calibrate_refuses_chains():
+    with pytest.raises(NotImplementedError, match="measures trees"):
+        parse_algorithm_config({"mode": "calibrate", "intensity": "chain_intensity", "data_path": "/calibration"})
 
 
 @pytest.mark.parametrize(

@@ -10,7 +10,9 @@ TokenSpeed hands the parsed JSON object to the drafter (``BaseDrafter.configure_
 
 Static mode keeps a fixed tree. Serve mode uses the calibrated GPU-side policy
 for draft depth and the number of meaningful verify nodes; the physical verify
-window stays fixed and unused slots are unconnected roots.
+window stays fixed and unused slots are unconnected roots. Calibrate mode
+measures a tree's cost tables into ``data_path``
+(:mod:`eagle_harness.tokenspeed.calibrate`).
 """
 
 from __future__ import annotations
@@ -67,6 +69,13 @@ def parse_algorithm_config(algorithm_config: Mapping[str, Any] | None) -> TokenS
 
         if config.intensity is not ComputeIntensity.CHAIN or config.mode is not Mode.SERVE:
             raise ValueError("chain_width_table requires serve mode and chain_intensity")
-    if config.mode not in (Mode.STATIC, Mode.SERVE):
-        raise NotImplementedError(f"{ALGORITHM_NAME} on TokenSpeed supports static and serve modes")
+    if config.mode is Mode.CALIBRATE:
+        from eagle_harness.core.limits import ComputeIntensity
+
+        if not config.data_path:
+            raise ValueError("TokenSpeed calibrate mode needs data_path, the calibration directory it writes")
+        if config.intensity is ComputeIntensity.CHAIN:
+            raise NotImplementedError("TokenSpeed calibrate mode measures trees; chains need a variable verify width")
+    if config.mode not in (Mode.STATIC, Mode.SERVE, Mode.CALIBRATE):
+        raise NotImplementedError(f"{ALGORITHM_NAME} on TokenSpeed supports static, serve and calibrate modes")
     return config

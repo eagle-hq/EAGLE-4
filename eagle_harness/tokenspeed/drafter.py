@@ -18,18 +18,24 @@ of TokenSpeed's:
 Static rounds use Eagle's complete graph. Serve rounds delegate chain/tree execution, fixed-ahead sampled-depth
 planning and recorded-q rejection to the engine. Cost decisions come only from eagle_harness.core; native EAGLE-3
 and reduced-vocabulary maps stay owned by TokenSpeed.
+
+Calibrate rounds run the same tree rounds at host-chosen widths (:mod:`~eagle_harness.tokenspeed.measurement`); they
+need TokenSpeed's ``BaseDrafter.rewrite_verify_outputs`` hook, which serving does not.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
 import torch
+from tokenspeed.runtime.execution.drafter.base import BaseDrafter
 from tokenspeed.runtime.execution.drafter.tree_round.device_policy import DevicePolicy
 from tokenspeed.runtime.execution.drafter.tree_round.dynamic import DynamicDrafter
 from tokenspeed.runtime.models.llama_eagle3 import LlamaForCausalLMEagle3
+from tokenspeed.runtime.utils.host_sync import allow_host_sync
 from typing_extensions import override
 
 from eagle_harness.core.config import DraftFamily, Mode, build_cost_model
@@ -37,8 +43,11 @@ from eagle_harness.core.draft_tree import DraftTree, TreeShape
 from eagle_harness.core.limits import ComputeIntensity
 from eagle_harness.tokenspeed.config import ALGORITHM_NAME, STATIC, TokenSpeedConfig, parse_algorithm_config
 from eagle_harness.tokenspeed.costs import tree_policy_costs
+from eagle_harness.tokenspeed.measurement import CostMeasurement, MeasurePolicy
 from eagle_harness.tokenspeed.models import CandidateRows, LlamaForCausalLMEagle4
 from eagle_harness.tokenspeed.tree_lanes import advance_lane_masks, lane_bits, seed_lane_masks, verify_window
+
+logger = logging.getLogger(__name__)
 
 
 class HarnessDrafter(DynamicDrafter):
@@ -53,9 +62,18 @@ class HarnessDrafter(DynamicDrafter):
         self.config: TokenSpeedConfig = STATIC
         self.tree: DraftTree | None = None
         self._lane_bits: torch.Tensor | None = None
+        self._target_is_moe = False
+        self._eos_token_id: int | None = None
+        # Calibrate mode: the cost measurement this drafter's rounds sample.
+        self.measurement: CostMeasurement | None = None
 
     def configure_algorithm(self, algorithm_config: Mapping[str, Any]) -> None:
         self.config = parse_algorithm_config(algorithm_config)
+        if self.config.mode is Mode.CALIBRATE and "rewrite_verify_outputs" not in vars(BaseDrafter):
+            raise RuntimeError(
+                f"{ALGORITHM_NAME} calibrate mode needs TokenSpeed's BaseDrafter.rewrite_verify_outputs hook to commit "
+                "one token per measured round; this TokenSpeed lacks it (serving does not need it)"
+            )
         if isinstance(self.draft_model, LlamaForCausalLMEagle4):
             self.draft_model.cuda_candidate_kernels = self.config.draft_model.cuda_candidate_kernels
         elif "draft_family" not in algorithm_config:
@@ -68,12 +86,16 @@ class HarnessDrafter(DynamicDrafter):
             getattr(target.config, name, 0) for name in ("num_experts", "num_local_experts", "n_routed_experts")
         )
         self._target_is_moe = any(expert_counts)
+        eos = getattr(target.config, "eos_token_id", None)
+        self._eos_token_id = eos[0] if isinstance(eos, (list, tuple)) else eos
 
     @property
     def dynamic(self) -> bool:
-        return self.config.mode is Mode.SERVE
+        return self.config.mode in (Mode.SERVE, Mode.CALIBRATE)
 
-    def _make_policy(self, verify_num: int, topk: int, depth: int) -> DevicePolicy:
+    def _make_policy(self, verify_num: int, topk: int, depth: int) -> DevicePolicy | MeasurePolicy:
+        if self.config.mode is Mode.CALIBRATE:
+            return self._make_measurement(verify_num, topk, depth)
         fully_scheduled = bool(self.config.chain_width_table and self.config.chain_width_table[0][0] == 1)
         model = None if fully_scheduled else build_cost_model(
             self.config,
@@ -96,6 +118,82 @@ class HarnessDrafter(DynamicDrafter):
             chain_width_table=self.config.chain_width_table,
             device=self.device,
         )
+
+    def _make_measurement(self, verify_num: int, topk: int, depth: int) -> MeasurePolicy:
+        """Calibrate mode: the host-chosen widths and the measurement their rounds sample."""
+        if self._eos_token_id is None:
+            raise ValueError(f"{ALGORITHM_NAME} calibrate mode ends a measured batch with an EOS; the target has none")
+        if self._sampling_backend.config.enable_speculative_sampling:
+            raise ValueError(f"{ALGORITHM_NAME} calibrate mode measures greedy rounds; disable speculative sampling")
+        mapping = self.draft_model_runner.mapping
+        self.measurement = CostMeasurement(
+            data_path=self.config.data_path,
+            tree_depth=depth,
+            tp_group=mapping.attn.tp_group if mapping.attn.tp_size > 1 else None,
+            rank=mapping.rank,
+            eos_token=self._eos_token_id,
+            device=self.device,
+        )
+        return MeasurePolicy(
+            verify_num=verify_num, node_top_k=topk, tree_depth=depth, intensity=self.config.intensity, device=self.device
+        )
+
+    # ------------------------------------------------------------------ calibrate rounds
+    @override
+    def prepare_target_forward(self, ctx: Any) -> None:
+        super().prepare_target_forward(ctx)
+        if self.measurement is not None and ctx.num_extends == 0:
+            # Inside the decode graph: the verify the measurement times starts here.
+            self.measurement.verify_start.record()
+
+    def rewrite_verify_outputs(self, ctx: Any, output_tokens: torch.Tensor, accept_lengths: torch.Tensor) -> None:
+        """Calibrate mode: every request commits the root alone, as the fixed token (the context grows by one token a
+        round), or as an EOS once the batch has its rounds. Serving leaves the outputs alone."""
+        measurement = self.measurement
+        if measurement is None or ctx.num_extends > 0:
+            return
+        measurement.verify_end.record()
+        n = ctx.output_layout.decode_width
+        rows = accept_lengths.shape[0]
+        accept_lengths.fill_(1)
+        output_tokens.view(rows, n)[:, 0].copy_(measurement.commit_token.expand(rows))
+        path = self._sampling_backend.accepted_path(rows, n)
+        path[:, 0] = 0
+        path[:, 1:] = -1
+
+    @override
+    def finish_round(self, ctx: Any, graph_bs: int | None) -> None:
+        """Calibrate mode: sample the verify the forward ran, then draft the round at the next widths between drained
+        GPUs and sample its draft; once the batch has its rounds, rank 0 writes its samples."""
+        measurement, bs = self.measurement, ctx.bs
+        if measurement is None or bs == 0 or self.input_buffers.all_extends_mid_chunk:
+            super().finish_round(ctx, graph_bs)
+            return
+        policy = self.policy
+        with allow_host_sync("calibrate mode measures between drained GPUs"):
+            if ctx.num_extends > 0:
+                measurement.on_extend()
+            else:
+                if ctx.output_layout.decode_width != policy.verify_num_limit:
+                    raise RuntimeError(
+                        f"a measured tree verifies its {policy.verify_num_limit}-row window, but the forward ran "
+                        f"{ctx.output_layout.decode_width} rows per request"
+                    )
+                measurement.record_verify(bs)
+            average_cache_len = int(self._round["frontier"][:bs].sum()) // bs
+            if measurement.params is not None:
+                policy.next_widths(bs, measurement.params.loop_top_m)
+            policy.write_round()
+            measurement.begin_draft()
+            super().finish_round(ctx, graph_bs)
+            measurement.end_draft(bs, policy.draft_width, policy.verify_width, average_cache_len)
+        if measurement.complete():
+            logger.info("eagle-harness calibrate: wrote %s", measurement.write_model_records())
+
+    @override
+    def has_round_graphs(self, graph_bs: int) -> bool:
+        # Calibrate mode drafts extends eagerly: it measures only decode rounds.
+        return self.measurement is None and super().has_round_graphs(graph_bs)
 
     @override
     def bind_tree(self, tree_spec: Any) -> None:
