@@ -20,7 +20,9 @@ Tree mode (``node_top_k > 1``) runs one round as follows (vLLM's hooks in bracke
    writes the next verify rows (``draft_tokens`` in node order, their parents in the :class:`TreeStore`).
 
 vLLM's scheduler fixes the verify width of a step from the batch size (``num_speculative_tokens``), so the
-width is the batch-size schedule's, not a per-round choice. The draft depth is per round: a captured growth skips
+width is the batch-size schedule's, not a per-round choice. On a vLLM with the optional ``verify_budget`` and
+``suspend_drafting`` hooks, :class:`~eagle_harness.vllm.batch_policy.BatchPolicy` applies that width to the batch being
+verified and runs the chain schedule's native-OFF batch sizes. The draft depth is per round: a captured growth skips
 the steps whose nodes could not enter the verify set (:mod:`~eagle_harness.vllm.depth_stop`).
 """
 
@@ -39,7 +41,8 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import SpeculatorCudaGraphManager
 
-from eagle_harness.vllm.config import DERIVED, VllmMethodConfig, parse_method_config
+from eagle_harness.vllm.batch_policy import BatchPolicy, host_speculator_hooks
+from eagle_harness.vllm.config import DERIVED, VllmMethodConfig, native_decode_ranges, parse_method_config
 from eagle_harness.vllm.depth_stop import derived_cost_tables
 from eagle_harness.vllm.gdn_tree_verify import LinearStateCommit, check_tree_verifiable
 from eagle_harness.vllm.round_commit import KvCompactor, chainize
@@ -57,6 +60,13 @@ class HarnessSpeculator(EagleSpeculator):
         super().__init__(vllm_config, device)
         self.method_config: VllmMethodConfig = parse_method_config(self.speculative_config.method_config)
         self.tree_mode = self.method_config.node_top_k > 1
+        hooks = host_speculator_hooks()  # empty on the 0.1.0 release engine: neither hook below is called there
+        self.batch_policy = BatchPolicy(
+            native_decode_ranges(self.speculative_config) if "suspend_drafting" in hooks else (),
+            self.speculative_config.num_speculative_tokens_per_batch_size if "verify_budget" in hooks else None,
+            self.max_num_reqs,
+        )
+        self.may_suspend_drafting = bool(self.batch_policy.native_ranges)
         if self.tree_mode:
             width = self.num_speculative_steps + 1
             self.store = TreeStore(self.max_num_reqs, width, device)
@@ -167,6 +177,13 @@ class HarnessSpeculator(EagleSpeculator):
                 draft_group=draft,
             )
         return self._bound
+
+    # ------------------------------------------------------------------ per-batch policy hooks
+    def suspend_drafting(self, num_reqs: int, req_ids: Any) -> bool:
+        return self.batch_policy.suspend(num_reqs)
+
+    def verify_budget(self, req_ids: Any, num_draft_tokens: Any) -> Any:
+        return self.batch_policy.verified_drafts(len(req_ids), num_draft_tokens)
 
     # ------------------------------------------------------------------ verify hooks
     def prepare_verify_inputs(self, input_batch: Any, model_inputs: dict[str, Any], *, dummy_run: bool = False) -> None:

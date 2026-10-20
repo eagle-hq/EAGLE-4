@@ -13,6 +13,15 @@ from eagle_harness.core.limits import ComputeIntensity
 from tests.test_chain_width import PROFILE
 
 
+@pytest.fixture(autouse=True)
+def release_engine_shape(monkeypatch):
+    """These tests pin the 0.1.0 release engine's contract (``native_decode_batch_sizes``, no speculator hooks)
+    whatever vLLM is installed; tests/test_vllm_batch_policy.py covers the hook engine."""
+    from eagle_harness.vllm import batch_policy
+
+    monkeypatch.setattr(batch_policy, "host_speculator_hooks", lambda: frozenset())
+
+
 def test_native_decode_is_a_distinct_opt_in_action(tmp_path):
     save_accept_profile(str(tmp_path), 100, [90, 80, 70])
     save_round_times(

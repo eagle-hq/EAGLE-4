@@ -63,7 +63,8 @@ DEFAULT_TREE_DEPTH = 12
 DERIVED = "derived"  # depth_stop_gain from the measured costs
 NATIVE_DECODE_UNSUPPORTED = (
     "eagle_harness: the chain schedule selects native plain decode (width 0), "
-    "which requires vLLM's native_decode_batch_sizes capability. K=0 still extends draft KV. "
+    "which requires vLLM's suspend_drafting speculator hook or its native_decode_batch_sizes field. "
+    "K=0 still extends draft KV. "
     "Use a compatible host, run without speculative_config, or calibrate root-only width 1."
 )
 
@@ -224,11 +225,16 @@ def configure_speculative_config(spec_config: Any) -> None:
             parsed.harness.data_path,
             allow_unpriced="max_verify_width" in spec_config.method_config,
         )
-        native_ranges = [(first, last) for first, last, width in widths if width == 0]
+        native_ranges = _native_ranges(widths)
         if native_ranges:
-            if not hasattr(spec_config, "native_decode_batch_sizes"):
+            from eagle_harness.vllm.batch_policy import host_speculator_hooks
+
+            if "suspend_drafting" in host_speculator_hooks():
+                pass  # HarnessSpeculator.suspend_drafting answers from the same widths (native_decode_ranges)
+            elif hasattr(spec_config, "native_decode_batch_sizes"):  # the 0.1.0 release engine
+                spec_config.native_decode_batch_sizes = native_ranges
+            else:
                 raise ValueError(NATIVE_DECODE_UNSUPPORTED)
-            spec_config.native_decode_batch_sizes = native_ranges
         spec_config.num_speculative_tokens_per_batch_size = _draft_token_schedule(
             widths, max_batch_size(parsed.harness.intensity)
         )
@@ -246,6 +252,29 @@ def configure_speculative_config(spec_config: Any) -> None:
             f"method_config.max_verify_width={parsed.max_verify_width} (they must differ by one); "
             "set only one of them."
         )
+
+
+def _native_ranges(widths: List[Tuple[int, int, int]]) -> List[Tuple[int, int]]:
+    return [(first, last) for first, last, width in widths if width == 0]
+
+
+def native_decode_ranges(spec_config: Any) -> List[Tuple[int, int]]:
+    """The batch-size ranges where the schedule :func:`configure_speculative_config` installed decodes natively
+    (width 0); empty when it installed none or the user set the schedule. Deterministic, so the speculator in each
+    worker recomputes what configure saw."""
+    parsed = parse_method_config(spec_config.method_config)
+    if not parsed.harness.mode.uses_cost_model:
+        return []
+    widths = _verify_widths(
+        parsed.harness.intensity,
+        parsed.max_verify_width,
+        parsed.harness.data_path,
+        allow_unpriced="max_verify_width" in spec_config.method_config,
+    )
+    installed = [tuple(entry) for entry in spec_config.num_speculative_tokens_per_batch_size or ()]
+    if installed != _draft_token_schedule(widths, max_batch_size(parsed.harness.intensity)):
+        return []
+    return _native_ranges(widths)
 
 
 def measured_tree_schedule(parsed: VllmMethodConfig) -> List[Tuple[int, int, int]] | None:
