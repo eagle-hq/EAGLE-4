@@ -35,11 +35,10 @@ if TYPE_CHECKING:
 
 
 class Mode(str, enum.Enum):
-    """Execution modes: static, serve, eval and calibrate."""
+    """Execution modes: static, serve and calibrate."""
 
     STATIC = "static"  # the fixed --speculative-num-steps / -eagle-topk / -num-draft-tokens tree, no cost model
     SERVE = "serve"
-    EVAL = "eval"
     CALIBRATE = "calibrate"
 
     @property
@@ -60,7 +59,6 @@ class DraftFamily(str, enum.Enum):
 class DraftModelOptions:
     """EAGLE-4 draft model switches (legacy environment variables: ``SGLANG_EAGLE4_*``, ``SGLANG_EAGLE_DRAFT_EMBED_*``)."""
 
-    moe_gate_acc: str = "fp32"  # router GEMM accumulate: fp32 or bf16
     cuda_candidate_kernels: bool = True
     embed_full: bool = True  # full draft embedding table on every TP rank
     embed_triton: bool = True  # draft embedding lookups on sglang's Triton kernel (a full table on the rank)
@@ -75,14 +73,6 @@ class L2Warm:
     gate_up_attention: Optional[Tuple[float, int]] = (0.3, 74)  # ... after an attention layer's QKV projection
     down_proj: Optional[Tuple[float, int]] = None  # MLP down weight, after the mixer's output projection
     next_input: Optional[Tuple[float, int]] = None  # next layer's input projection, after the MLP's down projection
-
-
-@dataclass(frozen=True)
-class RaggedVerify:
-    """Per-request (ragged) verify budgets; used with eval mode and chain intensity."""
-
-    enabled: bool = True
-    force_uniform: bool = False  # test aid: every request verifies the whole chain
 
 
 @dataclass(frozen=True)
@@ -101,8 +91,6 @@ class CostModelConfig:
     chain_tiny_max_bs: int = 2
     chain_scale_small: float = 1.45
     chain_scale_medium: float = 2.00
-    ragged_draft_relax: Tuple[float, float, float] = (0.75, 0.75, 0.75)
-    ragged_verify_threshold: Tuple[float, float, float] = (1.35, 1.60, 1.40)
 
     def params(self, depth_loss_ratio: float) -> CostModelParams:
         """The constants as the cost model's parameters, with the given depth loss ratio."""
@@ -117,8 +105,6 @@ class CostModelConfig:
             chain_tiny_max_bs=self.chain_tiny_max_bs,
             chain_scale_small=self.chain_scale_small,
             chain_scale_medium=self.chain_scale_medium,
-            ragged_draft_relax=self.ragged_draft_relax,
-            ragged_verify_threshold=self.ragged_verify_threshold,
         )
 
 
@@ -132,7 +118,6 @@ class HarnessConfig:
     intensity: ComputeIntensity = ComputeIntensity.HIGH
     draft_family: DraftFamily = DraftFamily.EAGLE4
     cost_model: CostModelConfig = field(default_factory=CostModelConfig)
-    ragged: RaggedVerify = field(default_factory=RaggedVerify)
     draft_model: DraftModelOptions = field(default_factory=DraftModelOptions)
     l2_warm: L2Warm = field(default_factory=L2Warm)
 
@@ -140,8 +125,6 @@ class HarnessConfig:
         """Check the config; return it."""
         if self.mode is Mode.CALIBRATE and not self.data_path:
             raise ValueError("calibrate mode needs data_path for its output")
-        if self.draft_model.moe_gate_acc not in ("fp32", "bf16"):
-            raise ValueError(f"draft_model.moe_gate_acc must be fp32 or bf16, got {self.draft_model.moe_gate_acc!r}.")
         return self
 
     @property
@@ -163,8 +146,6 @@ def build_cost_model(
     tree_depth: int,
     verify_num: int,
     target_is_moe: bool,
-    ragged_attention_supported: bool = False,
-    eval_batch_size: Optional[int] = None,
     tables: Optional[Dict[int, BatchCostTable]] = None,
     key: Optional["CostKey"] = None,
 ) -> CostModel:
@@ -185,13 +166,6 @@ def build_cost_model(
         tree_depth=tree_depth,
         verify_num=verify_num,
         target_is_moe=target_is_moe,
-        ragged=(
-            config.ragged.enabled
-            and config.mode is Mode.EVAL
-            and config.intensity is ComputeIntensity.CHAIN
-            and ragged_attention_supported
-        ),
-        eval_batch_size=eval_batch_size if config.mode is Mode.EVAL else None,
     )
 
 
@@ -236,9 +210,25 @@ def _convert(tp: Any, value: Any, where: str) -> Any:
     raise TypeError(f"{where}: unsupported field type {tp!r}.")
 
 
+# Options removed in 0.1.1: no engine adapter turned them on. A config that still sets one is refused by name.
+REMOVED_IN_0_1_1 = (
+    "mode: eval",
+    "ragged",
+    "cost_model.ragged_draft_relax",
+    "cost_model.ragged_verify_threshold",
+    "draft_model.moe_gate_acc",
+)
+
+
 def _from_dict(cls: type, data: Mapping[str, Any], where: str) -> Any:
     hints = typing.get_type_hints(cls)
     names = {f.name for f in dataclasses.fields(cls)}
+    keys = [f"{where}.{k}" if where else k for k in data]
+    if not where and data.get("mode") == "eval":
+        keys.append("mode: eval")
+    removed = [key for key in keys if key in REMOVED_IN_0_1_1]
+    if removed:
+        raise ValueError(f"{', '.join(removed)}: removed in eagle-harness 0.1.1 (no engine used it); delete it.")
     unknown = sorted(set(data) - names)
     if unknown:
         raise ValueError(f"{where or 'config'}: unknown keys {unknown}; valid keys are {sorted(names)}.")
@@ -273,7 +263,7 @@ def parse_harness_config(value: Optional[str], *, default_data_path: Optional[st
     if (
         default_data_path is not None
         and data.get("data_path") is None
-        and data.get("mode", Mode.SERVE.value) in (Mode.SERVE.value, Mode.EVAL.value)
+        and data.get("mode", Mode.SERVE.value) == Mode.SERVE.value
     ):
         data["data_path"] = default_data_path
     return harness_config_from_dict(data)

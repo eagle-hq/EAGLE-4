@@ -14,13 +14,12 @@ For legacy environment variables and CLI flags, see [Migration](migration.md).
 
 | key | type | default | meaning |
 |---|---|---|---|
-| `mode` | string | `"serve"` | `serve`: the cost model sizes every round. `eval`: cost sizing with evaluation settings (see the inactive-policy note below). `calibrate`: reserved for cost measurement (see [Calibration](calibration.md)). `static`: the fixed tree of the shape flags every round, no cost model (on SGLang the same EAGLE-4 round, graphs and kernels as the cost-model modes). |
+| `mode` | string | `"serve"` | `serve`: the cost model sizes every round. `calibrate`: reserved for cost measurement (see [Calibration](calibration.md)). `static`: the fixed tree of the shape flags every round, no cost model (on SGLang the same EAGLE-4 round, graphs and kernels as the cost-model modes). |
 | `data_path` | string | none | Offline calibration directory whose `cost/` subdirectory holds the cost tables and whose `key.json` names the setup they were measured on (GPU, TP size, model pair, engine, dtype); a directory keyed for another setup is refused. On SGLang, omitting it uses a matching packaged profile when available, otherwise live served-round costs ([Calibration](calibration.md#costs-measured-on-the-served-rounds)). vLLM and TokenSpeed require the engine-specific inputs below. |
 | `cost_cache` | string | `~/.cache/eagle-harness/costs` | Directory of the live-cost cache files (one per setup key). |
 | `intensity` | string | `"high_intensity"` | Draft shape family of the cost tables: `high_intensity`, `low_intensity` (trees) or `chain_intensity` (one candidate per step). It sets the batch limit and the verify widths that get a CUDA graph. |
 | `draft_family` | string | `"eagle4"` | `eagle4`. Sets the cost model's depth loss when `cost_model.depth_loss_ratio` is not given. |
 | `cost_model` | object | see below | Cost model constants. |
-| `ragged` | object | see below | Per-request verify budgets (eval mode with `chain_intensity` only). |
 | `draft_model` | object | see below | EAGLE-4 draft model options. |
 | `l2_warm` | object | see below | L2 prefetches of target weights inside the sglang verify graphs. |
 
@@ -37,30 +36,19 @@ with. Change them only together with a measurement.
 | `chain_tiny`, `chain_small`, `chain_medium`, `chain_large` | 3 numbers | `[2.60, 0.24, 0.00]`, `[2.85, 0.24, 0.00]`, `[2.54, 0.24, 0.70]`, `[1.55, 0.24, 0.00]` | Per chain size class: threshold, depth loss, cost power. |
 | `chain_scale_tiny`, `chain_scale_small`, `chain_scale_medium` | number | `1.25`, `1.45`, `2.00` | Bounds on the target's verify cost ratio that separate the chain size classes. |
 | `chain_tiny_max_bs` | integer | `2` | Largest batch size of the tiny chain class. |
-| `ragged_draft_relax` | 3 numbers | `[0.75, 0.75, 0.75]` | Draft threshold relaxation per size class when ragged budgets are on. |
-| `ragged_verify_threshold` | 3 numbers | `[1.35, 1.60, 1.40]` | Verify threshold per size class when ragged budgets are on. |
 
-## `ragged`
-
-| key | type | default | meaning |
-|---|---|---|---|
-| `enabled` | boolean | `true` | Per-request verify budgets. Applies only in `eval` mode with `chain_intensity` and an engine path that supports ragged attention. |
-| `force_uniform` | boolean | `false` | Test aid: every request verifies the whole chain. |
-
-The bundled adapters do not activate the ragged-budget policy or the evaluation-tail stopping rule. They also do not
-call the core model's adaptive chain-depth policy (`cost_model.chain_*`); vLLM's served-chain widths instead use the
-measured costs and acceptance profile described below. These keys remain accepted for configuration compatibility.
+On vLLM, served-chain widths come from the measured costs and acceptance profile described below, not from
+`cost_model.chain_*`. Options removed in 0.1.1 are listed in [Migration](migration.md#removed-in-011).
 
 ## `draft_model`
 
 | key | type | default | meaning |
 |---|---|---|---|
-| `moe_gate_acc` | string | `"fp32"` | Router GEMM accumulation of a SwiGLU-MoE draft: `fp32` or `bf16`. The latent MoE's router is sglang's `NemotronHMoE`, which ignores it. |
 | `cuda_candidate_kernels` | boolean | `true` | Use the native CUDA candidate kernels where the GPU supports them. With `false` the Triton kernels run (same results). |
 | `embed_full` | boolean | `true` | Keep the full draft embedding table on every rank, so a draft step looks tokens up without an all-reduce. |
 | `embed_triton` | boolean | `true` | Look draft embeddings up with sglang's Triton kernel (needs the full table on the rank). |
 
-The supported latent-MoE draft uses the host engine's expert implementation. Its router ignores `moe_gate_acc`.
+The supported latent-MoE draft uses the host engine's expert implementation.
 
 ## `l2_warm` (sglang)
 
@@ -95,7 +83,7 @@ vLLM takes these extra keys in `method_config`:
 | `tree_depth` | integer | `12` (trees), `15` (chains) | Maximum draft depth. It sizes the draft's KV lookahead. |
 | `depth_stop_gain` | `"derived"`, number or `null` | `"derived"` | What one more draft step must add to the expected accepted length. `"derived"`: the step's measured cost from the cost tables under `data_path`, or a startup error in automatic serving when a scheduled shape is unpriced. Static mode retains a lossless stop. A number sets a fixed gain. `0` stops only when no deeper node can enter the verify set. `null` always drafts `tree_depth` steps. |
 
-In `serve` and `eval` mode vLLM fixes the verify width per batch size (`num_speculative_tokens_per_batch_size`).
+In `serve` mode vLLM fixes the verify width per batch size (`num_speculative_tokens_per_batch_size`).
 Automatic trees require cost tables for every scheduled shape; set `depth_stop_gain` explicitly to opt out.
 Automatic chains require timings and an acceptance profile; an explicit `max_verify_width` or batch schedule opts into unpriced operation.
 Trees get the widest graph width of their cost buckets. A chain (`node_top_k` 1) verifies exactly its width, so the
@@ -118,7 +106,7 @@ For calibrated tree serving, provide `data_path` containing the calibration `cos
 The [TokenSpeed quickstart](quickstart-tokenspeed.md) distinguishes the single-client cap of 4 from the
 concurrent cap of 32. Neither is a general performance recommendation.
 The calibration must match the target, draft, hardware, tensor-parallel setup and recurrent-state dtype.
-`eval`, `calibrate` and live costs are not supported by this adapter. Chains use top-k 1 and `chain_intensity`.
+`calibrate` and live costs are not supported by this adapter. Chains use top-k 1 and `chain_intensity`.
 An explicit `chain_width_table` contains increasing `[minimum_batch_size, verify_width]` pairs in `serve` mode.
 A complete schedule starting at batch size 1 does not need cost files. This describes the configuration interface,
 not a measured high-concurrency speed claim. Sampled-tree distribution quality is unqualified.

@@ -6,8 +6,8 @@
 The fixture tests individual calls, not complete serving rounds: draft counts,
 verify contexts, and lagged scores are independent inputs. The CUDA replay seeds
 those inputs at the verify boundary, then runs the production decision kernels.
-Only the K=4 serving case is supported by DevicePolicy; K=6 and evaluation mode
-are checked as explicit rejections. CPU replay covers all three golden cases.
+Only the K=4 serving case is supported by DevicePolicy; K=6 is checked as an
+explicit rejection. CPU replay covers all three golden cases.
 """
 
 import copy
@@ -79,12 +79,12 @@ def _policy_kwargs(case):
         "tree_depth": config["tree_depth"],
         "compute_intensity": ComputeIntensity.HIGH.value,
         "is_moe_target": False,
-        "exec_mode": int(config["eval_batch_size"] is not None),
+        "exec_mode": 0,
         "device": torch.device("cuda"),
     }
 
 
-@pytest.mark.parametrize("case_index", range(3), ids=["serving-k4", "serving-k6", "evaluation-k8"])
+@pytest.mark.parametrize("case_index", range(3), ids=["serving-k4", "serving-k6", "serving-k8"])
 def test_golden_decisions_survive_device_input_precision(golden, golden_tables, case_index):
     case = golden["decisions_high_intensity"][case_index]
     _replay(_model(golden_tables, case), case["script"])
@@ -105,7 +105,7 @@ def test_golden_nonlagged_scores_round_trip(golden, golden_tables, flat):
     _replay(_model(golden_tables, case), script)
 
 
-@pytest.mark.parametrize("case_index", range(3), ids=["serving-k4", "serving-k6", "evaluation-k8"])
+@pytest.mark.parametrize("case_index", range(3), ids=["serving-k4", "serving-k6", "serving-k8"])
 def test_engine_packs_golden_costs_exactly(golden, golden_tables, engine_policy, case_index):
     from tokenspeed.runtime.execution.drafter.tree_round.policy_cost import build_tables
 
@@ -133,7 +133,7 @@ def test_engine_packs_golden_costs_exactly(golden, golden_tables, engine_policy,
             assert packed.verify_f64[live, interval_id].tolist() == list(interval.verify_thresholds)
 
 
-@pytest.mark.parametrize("case_index,error", [(1, "K=2/4/8"), (2, "serving only")])
+@pytest.mark.parametrize("case_index,error", [(1, "K=2/4/8")])
 def test_unsupported_golden_cases_are_explicit(golden, golden_tables, engine_policy, case_index, error):
     case = golden["decisions_high_intensity"][case_index]
     with pytest.raises(ValueError, match=error):
@@ -143,7 +143,7 @@ def test_unsupported_golden_cases_are_explicit(golden, golden_tables, engine_pol
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="production DevicePolicy requires CUDA")
 def test_device_policy_matches_golden_depth_and_width(golden, golden_tables, engine_policy):
     case = golden["decisions_high_intensity"][0]
-    assert case["case"] == {"eval_batch_size": None, "node_top_k": 4, "tree_depth": 12, "verify_num": 64}
+    assert case["case"] == {"node_top_k": 4, "tree_depth": 12, "verify_num": 64}
     script = _device_script(case)
     model = _model(golden_tables, case)
     _replay(model, script)

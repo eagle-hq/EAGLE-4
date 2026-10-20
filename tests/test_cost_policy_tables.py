@@ -19,7 +19,6 @@ from eagle_harness.core.cost_model import (
     CostModelParams,
     SizeClass,
     depth_loss_ratio,
-    ragged_verify_budget,
     stable_verify_thresholds,
     verify_cost_delta,
 )
@@ -264,7 +263,7 @@ def test_verify_cost_cutoff_is_strict(delta):
 
 @pytest.mark.parametrize("last_budget", [1, 64])
 @pytest.mark.parametrize("direction", [0.0, math.inf])
-def test_verify_stability_boundary_matches_paged_and_ragged(last_budget, direction):
+def test_verify_stability_boundary_matches_paged(last_budget, direction):
     table = _table(1)
     target = _curve((1.0, 1.2, 1.6), (0, 1, 3))
     table = replace(table, intervals=(replace(table.intervals[0], target=target),), model_ratio=(20.0,))
@@ -278,14 +277,11 @@ def test_verify_stability_boundary_matches_paged_and_ragged(last_budget, directi
     assert expected == (2 if direction == 0.0 else 4)
     model.recent_verify_nums[:] = [last_budget] * 5
     assert model.verify_num_paged(scores, 4, 1, 128, lagged=False) == (expected, False)
-    assert (
-        ragged_verify_budget([scores[1], scores[3]], 4, target.ratio, target.index, 2.4, [last_budget] * 5) == expected
-    )
     assert stable_verify_thresholds(2.4) == (2.4 * 0.95, 2.4 * 1.05)
 
 
 @pytest.mark.parametrize("direction,expected", [(0.0, 4), (math.inf, 2)])
-def test_cost_cutoff_matches_export_paged_and_ragged(direction, expected):
+def test_cost_cutoff_matches_export_and_paged(direction, expected):
     table = _table(1)
     last_cost = math.nextafter(1.06, direction)
     target = _curve((1.0, 1.02, last_cost), (0, 1, 3))
@@ -295,7 +291,6 @@ def test_cost_cutoff_matches_export_paged_and_ragged(direction, expected):
     delta = last_cost - 1.02
     assert interval.verify_cost_deltas[1][2] == (delta if delta > 0.04 else 0.0)
     assert model.verify_num_paged([0.0, 10.0, 10.0, 10.001], 4, 1, 128, lagged=False) == (expected, False)
-    assert ragged_verify_budget([10.0, 10.001], 4, target.ratio, target.index, 2.4, [-1] * 5) == expected
 
 
 def test_core_import_does_not_load_engine_dependencies():
@@ -316,7 +311,7 @@ assert callable(CostModel.tree_policy_costs)
 
 
 def test_export_preserves_all_caller_state_and_returns_detached_records():
-    model = _model(eval_batch_size=32)
+    model = _model()
     model.tier.size = SizeClass.HUGE
     model.tier.tiny = True
     model.interval_index = 3

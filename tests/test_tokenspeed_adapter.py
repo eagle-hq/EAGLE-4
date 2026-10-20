@@ -45,10 +45,9 @@ def test_serve_uses_device_policy_with_calibration():
     assert config.mode is Mode.SERVE and config.cost_dir == "/calibration/cost"
 
 
-@pytest.mark.parametrize("mode", ["eval", "calibrate"])
-def test_unsupported_cost_model_modes_are_refused(mode):
+def test_unsupported_cost_model_modes_are_refused():
     with pytest.raises(NotImplementedError, match="static and serve"):
-        parse_algorithm_config({"mode": mode, "data_path": "/nonexistent"})
+        parse_algorithm_config({"mode": "calibrate", "data_path": "/nonexistent"})
 
 
 @pytest.mark.parametrize(

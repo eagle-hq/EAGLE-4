@@ -14,7 +14,7 @@ import os
 import pytest
 
 from eagle_harness.core.calibration import AttentionShape, CalibrationPaths, fit_batch, remove_outliers
-from eagle_harness.core.cost_model import CostModel, CostModelParams, ragged_verify_budget
+from eagle_harness.core.cost_model import CostModel, CostModelParams
 from eagle_harness.core.cost_table import load_cost_tables
 from eagle_harness.core.limits import ComputeIntensity, verify_buckets
 from tests import synthetic
@@ -99,8 +99,6 @@ def _model(root: str, intensity: ComputeIntensity, case: dict) -> CostModel:
         node_top_k=case["node_top_k"],
         tree_depth=case["tree_depth"],
         verify_num=case["verify_num"],
-        ragged=intensity is ComputeIntensity.CHAIN,
-        eval_batch_size=case["eval_batch_size"],
     )
 
 
@@ -147,8 +145,6 @@ def _replay(cm: CostModel, script: list) -> None:
         elif op == "classify_chain":
             tier, scale = cm.classify_chain(*args)
             got = [int(tier), scale]
-        elif op == "ragged_active":
-            got = cm.ragged_active(*args)
         elif op == "history":
             got = cm.history_verify_num(*args)
         elif op == "draft_cost_row":
@@ -187,11 +183,6 @@ def test_outlier_filter_matches_fork(golden):
         assert float(mean) == case["mean"]
         assert kept == case["kept"]
         assert ok == case["ok"]
-
-
-def test_ragged_budget_matches_fork(golden):
-    for case in golden["budget"]:
-        assert ragged_verify_budget(*case["args"]) == case["out"]
 
 
 def test_verify_buckets_match_fork(golden):

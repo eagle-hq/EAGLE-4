@@ -6,8 +6,7 @@ engine paths and defaults. A mapped field does not imply both engines implement 
 
 Dotted paths describe nested JSON objects, not literal keys. For example, `cost_model.chain_tiny` becomes
 `{"cost_model": {"chain_tiny": [2.60, 0.24, 0.00]}}`. Use JSON booleans for switches and arrays for coefficient
-triples. An indexed path such as `cost_model.ragged_draft_relax[0]` identifies an element of a complete three-element
-array. The unindexed `SGLANG_EAGLE_HARNESS_RAGGED_DRAFT_RELAX` value sets all three elements.
+triples.
 
 `Dropped` means there is no corresponding option: the switch controlled a fixed optimization, a removed kernel,
 or diagnostic output. The defaults below describe the legacy environment-variable configuration, not an
@@ -18,7 +17,16 @@ environment parser.
 Remove `draft_model.moe_top_k` and `draft_model.packed_candidate_gather` from old JSON.
 Neither field affected execution; they are now rejected as unknown keys. Expert counts come
 from the checkpoint. The unused internal `CostModel.ragged_recent_verify_nums` state is also removed.
-`moe_gate_acc` remains for compatibility with the draft adapters.
+
+## Removed in 0.1.1
+
+No engine adapter turned these options on, so they changed nothing. A config that still sets one fails at load
+with `<option>: removed in eagle-harness 0.1.1`. Delete the option; use `"mode": "serve"` instead of `"eval"`.
+
+- `"mode": "eval"`
+- `ragged` (`enabled`, `force_uniform`)
+- `cost_model.ragged_draft_relax`, `cost_model.ragged_verify_threshold`
+- `draft_model.moe_gate_acc` (it applied only to SwiGLU-MoE drafts, which every engine refuses)
 
 ## Environment variables
 
@@ -32,17 +40,17 @@ from the checkpoint. The unused internal `CostModel.ragged_recent_verify_nums` s
 | `SGLANG_EAGLE_HARNESS_CHAIN_TINY_MAX_BS` | `cost_model.chain_tiny_max_bs` | `2` | Set the field |
 | `SGLANG_EAGLE_HARNESS_CHAIN_SCALE_SMALL` | `cost_model.chain_scale_small` | `1.45` | Set the field |
 | `SGLANG_EAGLE_HARNESS_CHAIN_SCALE_MEDIUM` | `cost_model.chain_scale_medium` | `2.00` | Set the field |
-| `SGLANG_EAGLE_HARNESS_RAGGED_DRAFT_RELAX` | `cost_model.ragged_draft_relax` | `0.75 (all three)` | Set the field |
-| `SGLANG_EAGLE_HARNESS_RAGGED_RELAX_SMALL` | `cost_model.ragged_draft_relax[0]` | `0.75` | Set the field |
-| `SGLANG_EAGLE_HARNESS_RAGGED_RELAX_MEDIUM` | `cost_model.ragged_draft_relax[1]` | `0.75` | Set the field |
-| `SGLANG_EAGLE_HARNESS_RAGGED_RELAX_LARGE` | `cost_model.ragged_draft_relax[2]` | `0.75` | Set the field |
-| `SGLANG_EAGLE_HARNESS_RAGGED_VERIFY_SMALL` | `cost_model.ragged_verify_threshold[0]` | `1.35` | Set the field |
-| `SGLANG_EAGLE_HARNESS_RAGGED_VERIFY_MEDIUM` | `cost_model.ragged_verify_threshold[1]` | `1.60` | Set the field |
-| `SGLANG_EAGLE_HARNESS_RAGGED_VERIFY_LARGE` | `cost_model.ragged_verify_threshold[2]` | `1.40` | Set the field |
-| `SGLANG_EAGLE_HARNESS_VERIFY_RAGGED` | `ragged.enabled` | `1` | Set the field |
-| `SGLANG_EAGLE_HARNESS_RAGGED_FORCE_UNIFORM` | `ragged.force_uniform` | `0` | Set the field |
+| `SGLANG_EAGLE_HARNESS_RAGGED_DRAFT_RELAX` | — | `0.75 (all three)` | Dropped (removed in 0.1.1) |
+| `SGLANG_EAGLE_HARNESS_RAGGED_RELAX_SMALL` | — | `0.75` | Dropped (removed in 0.1.1) |
+| `SGLANG_EAGLE_HARNESS_RAGGED_RELAX_MEDIUM` | — | `0.75` | Dropped (removed in 0.1.1) |
+| `SGLANG_EAGLE_HARNESS_RAGGED_RELAX_LARGE` | — | `0.75` | Dropped (removed in 0.1.1) |
+| `SGLANG_EAGLE_HARNESS_RAGGED_VERIFY_SMALL` | — | `1.35` | Dropped (removed in 0.1.1) |
+| `SGLANG_EAGLE_HARNESS_RAGGED_VERIFY_MEDIUM` | — | `1.60` | Dropped (removed in 0.1.1) |
+| `SGLANG_EAGLE_HARNESS_RAGGED_VERIFY_LARGE` | — | `1.40` | Dropped (removed in 0.1.1) |
+| `SGLANG_EAGLE_HARNESS_VERIFY_RAGGED` | — | `1` | Dropped (removed in 0.1.1) |
+| `SGLANG_EAGLE_HARNESS_RAGGED_FORCE_UNIFORM` | — | `0` | Dropped (removed in 0.1.1) |
 | `SGLANG_EAGLE4_MOE_TOP_K` | — | `unset` | Dropped; use checkpoint `num_experts_per_tok` |
-| `SGLANG_EAGLE4_MOE_GATE_ACC` | `draft_model.moe_gate_acc` | `fp32` | Set the field |
+| `SGLANG_EAGLE4_MOE_GATE_ACC` | — | `fp32` | Dropped (removed in 0.1.1) |
 | `SGLANG_EAGLE4_PACKED_CANDIDATE_GATHER` | — | `1` | Dropped; the implementation chooses the gather path |
 | `SGLANG_EAGLE4_CUDA_CANDIDATE_KERNELS` | `draft_model.cuda_candidate_kernels` | `1` | Set the field |
 | `SGLANG_EAGLE_DRAFT_EMBED_FULL` | `draft_model.embed_full` | `1` | Set the field |

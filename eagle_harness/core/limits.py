@@ -28,8 +28,6 @@ TAIL_MASK_BITS = 64  # One uint64 ancestry word per verify row.
 MAX_VERIFY_NUM = 64
 assert MAX_VERIFY_NUM <= TAIL_MASK_BITS
 MAX_CHAIN_VERIFY_NUM = 16
-# Above this batch size the ragged verify plan is used whenever it is enabled.
-RAGGED_PAGED_MAX_BS = 8
 
 COST_BATCH_SIZES: Tuple[int, ...] = (
     1,

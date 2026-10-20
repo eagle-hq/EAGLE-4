@@ -136,10 +136,6 @@ def build_latent_moe(config, prefix: str) -> nn.Module:
             f"moe EP 1 (got {parallel.moe_ep_size}), moe TP = TP (got {parallel.moe_tp_size} vs "
             f"{parallel.tp_size}) and --speculative-moe-a2a-backend none (got {get_moe_a2a_backend()})."
         )
-    # The block routes config.num_experts_per_tok experts with sglang's own router; the harness knob only
-    # changes the accumulation of a SwiGLU-MoE router.
-    if harness_config().draft_model.moe_gate_acc != "fp32":
-        logger.warning("draft_model.moe_gate_acc applies to SwiGLU-MoE drafts; the latent MoE ignores it.")
     # Imported here: sglang's model registry turns an import error into a warning and would drop the draft.
     from sglang.srt.models.nemotron_h import NemotronHMoE
 

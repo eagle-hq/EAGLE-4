@@ -30,7 +30,6 @@ from eagle_harness.core.limits import (
     MAX_CHAIN_VERIFY_NUM,
     MAX_NODE_TOP_K,
     MAX_VERIFY_NUM,
-    RAGGED_PAGED_MAX_BS,
     ComputeIntensity,
     check_shape,
     max_batch_size,
@@ -85,9 +84,6 @@ class CostModelParams:
     chain_tiny_max_bs: int = 2
     chain_scale_small: float = 1.45
     chain_scale_medium: float = 2.00
-    # Per chain tier SMALL / MEDIUM / LARGE.
-    ragged_draft_relax: tuple[float, float, float] = (0.75, 0.75, 0.75)
-    ragged_verify_threshold: tuple[float, float, float] = (1.35, 1.60, 1.40)
 
 
 def depth_loss_ratio(draft_family: str, *, target_is_moe: bool, intensity: ComputeIntensity) -> float:
@@ -231,42 +227,6 @@ def stable_verify_thresholds(threshold: float) -> tuple[float, float]:
     return threshold * 0.95, threshold * 1.05
 
 
-def ragged_verify_budget(
-    gains: Sequence[float],
-    draft_count: int,
-    time_value: Sequence[float],
-    time_index: Sequence[int],
-    threshold: float,
-    recent_verify_nums: Sequence[int],
-) -> int:
-    """Per-request verify budget for the ragged plan (pairwise gain / cost pruning)."""
-    cand: list[tuple[int, float, float]] = []
-    for pos, index in enumerate(time_index):
-        nodes = index + 1
-        if nodes > draft_count:
-            break
-        if nodes == 1:
-            cand.append((index, time_value[pos], 1.001))
-        elif nodes % 2 == 0 and gains[nodes // 2 - 1] > 0.0:
-            cand.append((index, time_value[pos], gains[nodes // 2 - 1]))
-    if len(cand) < 2:
-        return 2
-    last_verify_num = find_majority(recent_verify_nums)
-    mask = [c[0] for c in cand]
-    reset = mask[1]
-    thresholds = stable_verify_thresholds(threshold)
-    for i in range(len(cand) - 1):
-        for j in range(i + 1, len(cand)):
-            stable_threshold = thresholds[0 if last_verify_num <= cand[j][0] + 1 else 1]
-            cost_delta = verify_cost_delta(cand[i][1], cand[j][1])
-            if cost_delta > 0.0 and (cand[j][2] - cand[i][2]) / cost_delta < stable_threshold:
-                mask[j] = reset
-    verify_num = max(mask) + 1
-    if verify_num == 1 or verify_num > draft_count:
-        verify_num = min(c[0] for c in cand[1:]) + 1
-    return verify_num
-
-
 def _adjust_cost_ratio(model_cost_ratio: float) -> float:
     if model_cost_ratio < 5:
         raise ValueError(
@@ -314,10 +274,6 @@ class CostModel:
     tree_depth: int
     verify_num: int
     target_is_moe: bool = False
-    ragged: bool = False
-    # Evaluation runs: the benchmark's batch size. A round
-    # much smaller than it (a tail) stops drafting early.
-    eval_batch_size: int | None = None
 
     tier: _TierState = field(default_factory=_TierState)
     interval_index: int = 0
@@ -639,8 +595,6 @@ class CostModel:
             return WidthDecision(self._width_cap(), past_verify_num, False)
         if deltas is None:
             raise ValueError(f"tree_width at depth {depth} needs the host score deltas.")
-        if self._is_eval_tail(batch_size):
-            return WidthDecision(1, past_verify_num, True)
         base = deltas[0]
         gains = [x - base for x in deltas[1:]]
         self.tier.tiny = batch_size == 1
@@ -653,10 +607,6 @@ class CostModel:
         if self.tier.size in (SizeClass.MEDIUM, SizeClass.LARGE):
             width = 1 << (width - 1).bit_length()
         return WidthDecision(width, past_verify_num, False)
-
-    def _is_eval_tail(self, batch_size: int) -> bool:
-        ebs = self.eval_batch_size
-        return ebs is not None and batch_size != 1 and ebs > 4 * batch_size and ebs > batch_size + 4
 
     # ----------------------------------------------------------- chain depth
     def classify_chain(self, batch_size: int, cost_ratio: Sequence[float] | None = None) -> tuple[ChainTier, float]:
@@ -707,8 +657,6 @@ class CostModel:
         p = self.params
         coef = p.chain_coef[tier]
         threshold = coef.threshold
-        if self.ragged and tier > ChainTier.TINY:
-            threshold *= p.ragged_draft_relax[tier - 1]
         curr_step = depth // 2
         next_step = min(curr_step + 1, len(cost_llm) - 1)
         draft_step_cost = 1.0 / table.model_ratio[self.interval_index]
@@ -802,10 +750,6 @@ class CostModel:
             raise ValueError("Chain tier scale thresholds must be strictly increasing.")
         if type(p.chain_tiny_max_bs) is not int or not 0 <= p.chain_tiny_max_bs <= MAX_BATCH_SIZE_CHAIN:
             raise ValueError(f"Invalid chain_tiny_max_bs={p.chain_tiny_max_bs!r}.")
-        if len(p.ragged_draft_relax) != 3 or any(
-            not math.isfinite(value) or value <= 0 for value in p.ragged_draft_relax
-        ):
-            raise ValueError(f"Invalid ragged_draft_relax={p.ragged_draft_relax!r}.")
         self._validate_policy_tables(chain=True)
 
     # ---------------------------------------------------------- verify budget
@@ -822,14 +766,12 @@ class CostModel:
 
         ``scores`` are the cumulative top-k scores: of the previous round when
         ``lagged`` (no sync this round), else of this round. Returns
-        ``(verify_num, stop)``; ``stop`` is only set on evaluation tails.
+        ``(verify_num, False)``: the drafter's policy interface keeps a stop flag, never set here.
         """
         last_verify_num = find_majority(self.recent_verify_nums)
         cap = len(scores) if lagged else requested
         self.recent_verify_nums = self.recent_verify_nums[1:] + [requested]
         cost = self._require_verify_cost(batch_size, average_cache_len)
-        if self._is_eval_tail(batch_size):
-            return cost.index[1] + 1, True
         index = [i for i in cost.index if i < min(cap, requested)]
         if max(index) == 0:
             # Early stopping left fewer candidates than the smallest tree bucket:
@@ -852,14 +794,6 @@ class CostModel:
         if verify_num == 1 or requested < verify_num:
             verify_num = min(index[1:]) + 1
         return verify_num, False
-
-    def ragged_active(self, batch_size: int) -> bool:
-        """Whether per-request (ragged) verify budgets apply at this batch size."""
-        if not self.ragged:
-            return False
-        if batch_size > RAGGED_PAGED_MAX_BS:
-            return True
-        return self.classify_chain(batch_size)[0] > ChainTier.TINY
 
     def _require_verify_cost(self, batch_size: int, average_cache_len: int) -> VerifyCost:
         cost = self.verify_cost(batch_size, average_cache_len)

@@ -141,8 +141,6 @@ def test_golden_chain_decisions(golden):
             tables=tables,
             tree_depth=config["tree_depth"],
             verify_num=config["verify_num"],
-            ragged=True,
-            eval_batch_size=config["eval_batch_size"],
         )
         costs = model.chain_policy_costs()
         for step in case["script"]:
@@ -160,7 +158,7 @@ def test_golden_chain_decisions(golden):
     assert decisions == {False, True}
 
 
-def test_custom_parameters_and_ragged_thresholds():
+def test_custom_parameters():
     params = CostModelParams(
         chain_coef=tuple(ChainCoef(t, 0.125, 0.5) for t in (1.0, 2.0, 3.0, 4.0)),
         chain_ref_cost=3.0,
@@ -170,9 +168,8 @@ def test_custom_parameters_and_ragged_thresholds():
         chain_tiny_max_bs=1,
         chain_scale_small=1.3,
         chain_scale_medium=1.6,
-        ragged_draft_relax=(0.5, 0.6, 0.7),
     )
-    model = _model(params=params, ragged=True)
+    model = _model(params=params)
     costs = model.chain_policy_costs()
     model.interval_index = 4
     terms = costs.batches[2].intervals[4][2]
@@ -180,9 +177,7 @@ def test_custom_parameters_and_ragged_thresholds():
     assert terms.cost == 0.1 + (2.0 - 1.2)
     assert terms.cliff_cost == 0.2 + (2.05 - 1.2)
     ref_cost = sum(c + 0.05 * (2 * i + 1) for i, c in enumerate((1.1, 1.2, 2, 2.05, 2.1, 2.15, 2.2, 2.25))) / 8
-    assert terms.threshold == (4.0 * 0.7) * (3.0 / ref_cost) ** 0.5
-    paged = replace(model, ragged=False).chain_stop_terms(2, 3)
-    assert paged.threshold == 4.0 * (3.0 / ref_cost) ** 0.5
+    assert terms.threshold == 4.0 * (3.0 / ref_cost) ** 0.5
     tiny = costs.batches[0].intervals[4][2]
     assert tiny.threshold == (3.0 / ref_cost) ** 0.5
 
@@ -254,12 +249,8 @@ def test_cliff_cutoffs_are_strict(minimum, ratio, enabled):
     assert last.cliff_cost == last.cliff_gain_scale == 0.0
 
 
-@pytest.mark.parametrize("ragged", [False, True])
-def test_exported_terms_match_host_across_all_live_batches_and_intervals(ragged):
-    model = _model(
-        tables={4: _table(), 32: _table(32, step=256, model_ratio=10)},
-        ragged=ragged,
-    )
+def test_exported_terms_match_host_across_all_live_batches_and_intervals():
+    model = _model(tables={4: _table(), 32: _table(32, step=256, model_ratio=10)})
     costs = model.chain_policy_costs()
     for bs, batch in enumerate(costs.batches, 1):
         for interval_id, interval in enumerate(batch.intervals):
@@ -271,7 +262,7 @@ def test_exported_terms_match_host_across_all_live_batches_and_intervals(ragged)
 
 
 def test_export_preserves_values_and_mutable_object_identities():
-    model = _model(eval_batch_size=512, ragged=True)
+    model = _model()
     model.tier.size = SizeClass.HUGE
     model.tier.tiny = True
     model.interval_index = 4
@@ -397,8 +388,6 @@ def test_invalid_cost_curves(curve_name, change):
         {"chain_scale_medium": 1.4},
         {"chain_tiny_max_bs": -1},
         {"chain_tiny_max_bs": 1.5},
-        {"ragged_draft_relax": ()},
-        {"ragged_draft_relax": (0.75, math.inf, 0.75)},
     ],
 )
 def test_invalid_chain_parameters(change):

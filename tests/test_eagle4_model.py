@@ -17,7 +17,6 @@ pytest.importorskip("sglang.srt.models.llama")
 
 import torch  # noqa: E402
 
-from eagle_harness.core.config import harness_config_from_dict  # noqa: E402
 from eagle_harness.sglang.models import llama_eagle4  # noqa: E402
 from eagle_harness.sglang.models.llama_eagle4 import (  # noqa: E402
     Eagle4DecoderLayer,
@@ -268,14 +267,12 @@ class _FakeNemotronHMoE(torch.nn.Module):
         self.config, self.layer_idx, self.quant_config, self.prefix = config, layer_idx, quant_config, prefix
 
 
-def _latent_moe_host(monkeypatch, moe_gate_acc="fp32", ep_size=1, a2a_none=True):
-    """One TP rank with no expert parallelism, the cleaned harness config and the fake engine block."""
+def _latent_moe_host(monkeypatch, ep_size=1, a2a_none=True):
+    """One TP rank with no expert parallelism and the fake engine block."""
     monkeypatch.setattr(
         llama_eagle4, "get_parallel", lambda: SimpleNamespace(tp_size=1, moe_tp_size=1, moe_ep_size=ep_size)
     )
     monkeypatch.setattr(llama_eagle4, "get_moe_a2a_backend", lambda: SimpleNamespace(is_none=lambda: a2a_none))
-    options = {"mode": "static", "draft_model": {"moe_gate_acc": moe_gate_acc}}
-    monkeypatch.setattr(llama_eagle4, "harness_config", lambda: harness_config_from_dict(options))
     module = types.ModuleType("sglang.srt.models.nemotron_h")
     module.NemotronHMoE = _FakeNemotronHMoE
     monkeypatch.setitem(sys.modules, "sglang.srt.models.nemotron_h", module)
@@ -295,13 +292,6 @@ def test_the_latent_moe_is_the_engine_block_over_the_checkpoint_experts(monkeypa
     assert (moe.config.mlp_hidden_act, moe.config.mlp_bias, moe.config.norm_topk_prob) == ("relu2", False, True)
     assert moe.config is not config and not hasattr(config, "mlp_hidden_act")
     assert caplog.text == ""
-
-
-def test_a_non_fp32_gate_accumulation_is_kept_as_a_knob_but_ignored_with_a_warning(monkeypatch, caplog):
-    _latent_moe_host(monkeypatch, moe_gate_acc="bf16")
-    with caplog.at_level(logging.WARNING, logger=llama_eagle4.logger.name):
-        build_latent_moe(nemotron_draft_config(), "m")
-    assert "moe_gate_acc" in caplog.text and "latent MoE ignores it" in caplog.text
 
 
 @pytest.mark.parametrize("host", [dict(ep_size=2), dict(a2a_none=False)])
