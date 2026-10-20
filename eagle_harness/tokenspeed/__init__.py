@@ -4,7 +4,8 @@
 """TokenSpeed plugin: EAGLE-Harness as a TokenSpeed drafter.
 
 Registered through the ``tokenspeed.plugins`` entry point (see pyproject.toml) and TokenSpeed's plugin registries, with
-the generic hooks of TokenSpeed branch ``pr-spec-plugin-hooks``; nothing in TokenSpeed is patched.
+the hooks :mod:`eagle_harness.tokenspeed.hooks` checks (the release engine's, or a capability engine's); nothing in
+TokenSpeed is patched.
 
 ``docs/architecture.md`` describes the package layout.
 """

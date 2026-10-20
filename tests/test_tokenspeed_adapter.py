@@ -31,8 +31,16 @@ K, STEPS, H, BS, WIDTH = 4, 5, 8, 3, 16
 
 
 # ------------------------------------------------------------------ config
-def test_no_config_is_a_static_tree():
-    assert parse_algorithm_config(None).mode is Mode.STATIC
+@pytest.mark.parametrize("algorithm_config", [None, {}])
+def test_serve_is_the_default_and_needs_costs(algorithm_config):
+    # The same default as a config that omits "mode": serve, which refuses to run without its cost inputs.
+    with pytest.raises(ValueError, match=r"serve mode \(the default\) needs data_path.*\"mode\": \"static\""):
+        parse_algorithm_config(algorithm_config)
+    assert parse_algorithm_config({"data_path": "/calibration"}).mode is Mode.SERVE
+
+
+def test_static_is_chosen_explicitly():
+    assert parse_algorithm_config({"mode": "static"}).mode is Mode.STATIC
 
 
 def test_static_config_parses_harness_keys():
@@ -93,6 +101,21 @@ def test_tree_mode_rejects_chain_width_schedule():
         })
 
 
+@pytest.mark.parametrize("mode", [{}, {"mode": "serve"}])
+def test_complete_chain_schedule_needs_no_mode_and_no_calibration(mode):
+    # Serve is the default, so a complete schedule without "mode" is the same launch as one with it.
+    config = parse_algorithm_config({"intensity": "chain_intensity", "chain_width_table": [[1, 4], [32, 2]], **mode})
+    assert config.mode is Mode.SERVE and not config.data_path and config.fully_scheduled
+
+
+def test_only_a_schedule_from_batch_size_one_is_complete():
+    config = parse_algorithm_config({
+        "data_path": "/calibration", "intensity": "chain_intensity", "chain_width_table": [[2, 4], [32, 2]],
+    })
+    assert not config.fully_scheduled
+    assert not parse_algorithm_config({"data_path": "/calibration"}).fully_scheduled
+
+
 def test_complete_chain_schedule_needs_no_calibration():
     config = parse_algorithm_config({
         "mode": "serve", "intensity": "chain_intensity", "chain_width_table": [[1, 8], [64, 4]],
@@ -151,6 +174,76 @@ def test_hook_check_names_what_is_missing(fake_host):
     assert hooks._problem(hooks.Hook("fakehost_api:register_model")) == "fakehost_api:register_model"
     assert "no parameter override" in hooks._problem(hooks.Hook("fakehost_api:register_drafter", ("override",)))
     assert "not importable" in hooks._problem(hooks.Hook("nosuchhost.api:x"))
+
+
+@pytest.fixture
+def fake_plugins(monkeypatch):
+    """A ``tokenspeed.runtime.plugins`` module whose every pinned hook resolves; returns it for the test to shape."""
+    packages = {name: types.ModuleType(name) for name in ("tokenspeed", "tokenspeed.runtime")}
+    plugins = types.ModuleType("tokenspeed.runtime.plugins")
+    for name, module in {**packages, plugins.__name__: plugins}.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(hooks, "_problem", lambda hook: None)
+    return plugins
+
+
+def test_capability_contract_registers_with_every_capability(fake_plugins):
+    fake_plugins.PLUGIN_API_VERSION = 3
+    fake_plugins.PLUGIN_CAPABILITIES = hooks.REQUIRED_CAPABILITIES | {"drafter.suspend_drafting"}
+    assert hooks.contract() == "capabilities"
+    assert hooks.hook_problems() == []
+    assert hooks.tree_policy() == hooks.PUBLIC_POLICY
+
+
+def test_capability_contract_names_a_missing_capability(fake_plugins):
+    fake_plugins.PLUGIN_API_VERSION = 3
+    fake_plugins.PLUGIN_CAPABILITIES = hooks.REQUIRED_CAPABILITIES - {"drafter.dynamic_tree"}
+    assert hooks.hook_problems() == ["PLUGIN_CAPABILITIES lacks drafter.dynamic_tree"]
+
+
+def test_capability_contract_refuses_a_breaking_api_version(fake_plugins):
+    # A capability engine's version counts breaking changes only: a higher one is not "newer and compatible".
+    fake_plugins.PLUGIN_API_VERSION = 4
+    fake_plugins.PLUGIN_CAPABILITIES = hooks.REQUIRED_CAPABILITIES
+    (problem,) = hooks.hook_problems()
+    assert "PLUGIN_API_VERSION 4" in problem and "breaking" in problem
+
+
+def test_release_contract_takes_the_release_names(fake_plugins):
+    fake_plugins.PLUGIN_API_VERSION = 4
+    assert hooks.contract() == "release"
+    assert hooks.hook_problems() == []
+    assert hooks.tree_policy() == hooks.RELEASE_POLICY
+
+
+def test_release_contract_refuses_an_older_api_version(fake_plugins):
+    # Without capabilities, version 3 is the plugin API of TokenSpeed main before the eagle-harness hooks.
+    fake_plugins.PLUGIN_API_VERSION = 3
+    assert hooks.hook_problems() == ["PLUGIN_API_VERSION 3 < 4"]
+
+
+def test_each_contract_pins_its_own_tree_policy_names():
+    capability = {h.path.rpartition(".")[2] for h in hooks.CAPABILITY_HOOKS}
+    release = {h.path.rpartition(".")[2] for h in hooks.RELEASE_HOOKS}
+    assert set(hooks.PUBLIC_POLICY) <= capability and not set(hooks.RELEASE_POLICY) & capability
+    assert set(hooks.RELEASE_POLICY) <= release and not set(hooks.PUBLIC_POLICY) & release
+
+
+def test_the_drafter_aliases_every_release_name_to_its_public_policy():
+    # drafter.py imports TokenSpeed, so read its class body instead of importing it.
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(hooks.__file__).with_name("drafter.py").read_text())
+    (cls,) = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "HarnessDrafter"]
+    methods = {node.name for node in cls.body if isinstance(node, ast.FunctionDef)}
+    aliases = {
+        node.targets[0].id: node.value.id
+        for node in cls.body
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name)
+    }
+    assert set(hooks.PUBLIC_POLICY) <= methods
+    assert aliases == dict(zip(hooks.RELEASE_POLICY, hooks.PUBLIC_POLICY))
 
 
 # ------------------------------------------------------------------ the tree as TokenSpeed lanes

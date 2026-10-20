@@ -49,6 +49,13 @@ Each engine process loads the plugin and checks the hooks:
 The plugin never raises during loading, so installing eagle-harness cannot break an engine install. Run
 `eagle-harness-check` to see the same verdict without starting a server ([Troubleshooting](troubleshooting.md)).
 
+TokenSpeed admits two plugin contracts. A TokenSpeed that publishes `PLUGIN_CAPABILITIES` must list
+every capability in `REQUIRED_CAPABILITIES` (`eagle_harness/tokenspeed/hooks.py`) and keep the plugin
+API version the adapter was written for. On that line the version changes only for a breaking change. The
+release engine (`0.1.1+eagle.N`) publishes no capabilities and must report plugin API version 4 or
+later. In both cases the adapter then checks the names and parameters of the hooks it calls. The two lines
+name the tree-policy methods the adapter overrides differently, and the adapter overrides both sets.
+
 ## Structured output on vLLM
 
 Tree-mode batches containing JSON, regex, or forced-tool grammar requests emit only the root token of each verify

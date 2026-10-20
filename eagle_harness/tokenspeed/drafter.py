@@ -35,10 +35,16 @@ from typing_extensions import override
 from eagle_harness.core.config import DraftFamily, Mode, build_cost_model
 from eagle_harness.core.draft_tree import DraftTree, TreeShape
 from eagle_harness.core.limits import ComputeIntensity
-from eagle_harness.tokenspeed.config import ALGORITHM_NAME, STATIC, TokenSpeedConfig, parse_algorithm_config
+from eagle_harness.core.models import target_is_moe
+from eagle_harness.tokenspeed.config import ALGORITHM_NAME, TokenSpeedConfig, parse_algorithm_config
 from eagle_harness.tokenspeed.costs import tree_policy_costs
+from eagle_harness.tokenspeed.hooks import tree_policy
 from eagle_harness.tokenspeed.models import CandidateRows, LlamaForCausalLMEagle4
-from eagle_harness.tokenspeed.tree_lanes import advance_lane_masks, lane_bits, seed_lane_masks, verify_window
+from eagle_harness.tokenspeed.tree_lanes import advance_lane_masks, lane_bits, seed_lane_masks
+from eagle_harness.tokenspeed.tree_lanes import verify_window as fill_verify_window
+
+# TokenSpeed's own candidate ranking, under the installed engine's name (see hooks.tree_policy).
+_ENGINE_CANDIDATES = getattr(DynamicDrafter, tree_policy().candidates)
 
 
 class HarnessDrafter(DynamicDrafter):
@@ -50,7 +56,7 @@ class HarnessDrafter(DynamicDrafter):
         if not isinstance(model, LlamaForCausalLMEagle3):
             raise TypeError(f"{ALGORITHM_NAME} requires an EAGLE-3 or EAGLE-4 draft, got {type(model)}")
         self.draft_model = model
-        self.config: TokenSpeedConfig = STATIC
+        self.config: TokenSpeedConfig | None = None  # set by configure_algorithm, else resolved in bind_tree
         self.tree: DraftTree | None = None
         self._lane_bits: torch.Tensor | None = None
 
@@ -64,18 +70,14 @@ class HarnessDrafter(DynamicDrafter):
     @override
     def wire_target(self, target: Any) -> None:
         super().wire_target(target)
-        expert_counts = (
-            getattr(target.config, name, 0) for name in ("num_experts", "num_local_experts", "n_routed_experts")
-        )
-        self._target_is_moe = any(expert_counts)
+        self._target_is_moe = target_is_moe(target.config)
 
     @property
     def dynamic(self) -> bool:
-        return self.config.mode is Mode.SERVE
+        return self.config is not None and self.config.mode is Mode.SERVE
 
     def _make_policy(self, verify_num: int, topk: int, depth: int) -> DevicePolicy:
-        fully_scheduled = bool(self.config.chain_width_table and self.config.chain_width_table[0][0] == 1)
-        model = None if fully_scheduled else build_cost_model(
+        model = None if self.config.fully_scheduled else build_cost_model(
             self.config,
             node_top_k=topk,
             tree_depth=depth,
@@ -99,6 +101,8 @@ class HarnessDrafter(DynamicDrafter):
 
     @override
     def bind_tree(self, tree_spec: Any) -> None:
+        if self.config is None:  # launched without --speculative-algorithm-config: the defaults, or their refusal
+            self.config = parse_algorithm_config(None)
         if self.dynamic:
             shape = tree_spec.config
             self.bind_dynamic_tree(tree_spec, self._make_policy(shape.num_nodes, shape.topk, shape.num_steps))
@@ -141,7 +145,9 @@ class HarnessDrafter(DynamicDrafter):
         return super().run(base_ctx, logits_output, output_tokens, accept_lengths)
 
     # ------------------------------------------------------------------ the tree policy
-    def _candidates(self, rows: CandidateRows) -> tuple[torch.Tensor, torch.Tensor]:
+    # Defined under TokenSpeed's public names (hooks.PUBLIC_POLICY) and aliased to the release engine's private ones
+    # at the end of the class; each engine calls only its own names.
+    def round_candidates(self, rows: CandidateRows) -> tuple[torch.Tensor, torch.Tensor]:
         if isinstance(self.draft_model, LlamaForCausalLMEagle4):
             if self.sampled_trees:
                 rows.next_token_logits, rows.candidate_ids, topk = self.draft_model.candidate_head(
@@ -149,24 +155,22 @@ class HarnessDrafter(DynamicDrafter):
                 )
                 return topk
             return self.draft_model.candidate_topk(rows.normed, self.lanes_per_request)
-        return super()._candidates(rows)
+        return _ENGINE_CANDIDATES(self, rows)
 
-    @override
-    def _seed_tree_lanes(self, bs: int, logits_output: CandidateRows, frontier: torch.Tensor):
+    def seed_tree(self, bs: int, logits_output: CandidateRows, frontier: torch.Tensor):
         """Depth 1 from the draft extend's candidates; returns the lanes' ``[bs, K]`` tokens and ``[bs * K, H]`` rows."""
         tree, k = self.tree, self.lanes_per_request
-        probs, tokens = self._candidates(logits_output)
+        probs, tokens = self.round_candidates(logits_output)
         tree.stage_root(bs, probs, tokens, logits_output.hidden_states)
         tree.begin(bs)
         seed_lane_masks(self.tree_lanes.lane_mask, bs, self._lane_bits)
         self.tree_lanes.set_frontier(bs, frontier)
         return tree.front_tokens[: bs * k].view(bs, k), tree.front_hidden[: bs * k]
 
-    @override
-    def _expand_tree_lanes(self, bs: int, step: int, logits_output: CandidateRows):
+    def expand_tree(self, bs: int, step: int, logits_output: CandidateRows):
         """Children of the depth-``step`` lanes; returns the next lanes' tokens and rows (``None`` after the last step)."""
         tree, k = self.tree, self.lanes_per_request
-        probs, tokens = self._candidates(logits_output)
+        probs, tokens = self.round_candidates(logits_output)
         tree.step(bs, step, probs, tokens, logits_output.hidden_states)
         lanes = tree.front_tokens[: bs * k].view(bs, k)
         if step == self.spec_num_steps - 1:
@@ -174,10 +178,15 @@ class HarnessDrafter(DynamicDrafter):
         advance_lane_masks(tree, self.tree_lanes.lane_mask, bs, step, self._lane_bits)
         return lanes, tree.front_hidden[: bs * k]
 
-    @override
-    def _draft_window(self, bs: int, next_tokens: torch.Tensor) -> torch.Tensor:
+    def verify_window(self, bs: int, next_tokens: torch.Tensor) -> torch.Tensor:
         """The best ``N - 1`` nodes and the root as next round's verify window; their parents into the tree spec."""
-        verify_window(
+        fill_verify_window(
             self.tree, bs, self.spec_num_steps, next_tokens[:, 0], next_tokens, self.tree_spec.draft_parent_buf[:bs]
         )
         return next_tokens
+
+    # The release engine's names for the same policy (hooks.RELEASE_POLICY).
+    _candidates = round_candidates
+    _seed_tree_lanes = seed_tree
+    _expand_tree_lanes = expand_tree
+    _draft_window = verify_window

@@ -4,8 +4,8 @@
 """The TokenSpeed plugin against the installed TokenSpeed: hook check, registration, the draft model's profile.
 
 No GPU work, but TokenSpeed imports only on a host with a GPU (its kernel package refuses otherwise), so this runs in
-the GPU test jobs and is skipped elsewhere. On a TokenSpeed without the ``pr-spec-plugin-hooks`` hooks the registration tests
-check that the plugin switches itself off instead.
+the GPU test jobs and is skipped elsewhere. On a TokenSpeed without the adapter's hooks (:mod:`eagle_harness.tokenspeed.hooks`: the release engine or a
+capability engine) the registration tests check that the plugin switches itself off instead.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from eagle_harness.tokenspeed.hooks import hook_problems  # noqa: E402
 
 HAS_HOOKS = not hook_problems()
 needs_hooks = pytest.mark.skipif(
-    not HAS_HOOKS, reason=f"TokenSpeed without the pr-spec-plugin-hooks hooks: {hook_problems()}"
+    not HAS_HOOKS, reason=f"TokenSpeed without the adapter's hooks: {hook_problems()}"
 )
 
 
@@ -70,6 +70,38 @@ def test_draft_profile_is_a_valid_mha_profile():
 
     profile = LlamaForCausalLMEagle4.model_profile(None)
     assert isinstance(profile, ModelProfile) and profile.cache_family == "mha" and profile.linear_attention is None
+
+
+@needs_hooks
+def test_the_engine_calls_the_harness_tree_policy():
+    # HarnessDrafter defines the public names and aliases the release ones; the installed engine must call one set.
+    from tokenspeed.runtime.execution.drafter.eagle import Eagle
+    from tokenspeed.runtime.execution.drafter.tree_round.dynamic import DynamicDrafter
+
+    from eagle_harness.tokenspeed.drafter import HarnessDrafter
+    from eagle_harness.tokenspeed.hooks import PUBLIC_POLICY, RELEASE_POLICY, tree_policy
+
+    names = tree_policy()
+    for public, release in zip(PUBLIC_POLICY, RELEASE_POLICY):
+        assert getattr(HarnessDrafter, release) is getattr(HarnessDrafter, public)
+    assert hasattr(DynamicDrafter, names.candidates)
+    for name in names[1:]:
+        assert getattr(HarnessDrafter, name) is not getattr(Eagle, name)
+
+
+@needs_hooks
+def test_a_wrapped_moe_target_is_moe(monkeypatch):
+    # Experts under text_config (a multimodal wrapper) count, as in core.models.target_is_moe.
+    from types import SimpleNamespace
+
+    from tokenspeed.runtime.execution.drafter.tree_round.dynamic import DynamicDrafter
+
+    from eagle_harness.tokenspeed.drafter import HarnessDrafter
+
+    monkeypatch.setattr(DynamicDrafter, "wire_target", lambda self, target: None)
+    drafter = HarnessDrafter.__new__(HarnessDrafter)
+    drafter.wire_target(SimpleNamespace(config=SimpleNamespace(text_config=SimpleNamespace(num_experts=64))))
+    assert drafter._target_is_moe is True
 
 
 @needs_hooks

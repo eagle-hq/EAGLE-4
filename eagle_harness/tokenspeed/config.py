@@ -8,36 +8,39 @@ TokenSpeed hands the parsed JSON object to the drafter (``BaseDrafter.configure_
 ``--speculative-eagle-topk`` (children per node), ``--speculative-num-steps`` (tree depth) and
 ``--speculative-num-draft-tokens`` (verify width, root included).
 
-Static mode keeps a fixed tree. Serve mode uses the calibrated GPU-side policy
-for draft depth and the number of meaningful verify nodes; the physical verify
-window stays fixed and unused slots are unconnected roots.
+Serve mode, the default, uses the calibrated GPU-side policy for draft depth and the number of meaningful verify
+nodes; the physical verify window stays fixed and unused slots are unconnected roots. It needs ``data_path`` unless a
+complete chain schedule sets every width. Static mode (``{"mode": "static"}``) keeps a fixed tree.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields
 from typing import Any
 
 from eagle_harness.core.config import HarnessConfig, Mode, harness_config_from_dict
+from eagle_harness.core.limits import ComputeIntensity
 
 ALGORITHM_NAME = "EAGLE_HARNESS"
+
+
 @dataclass(frozen=True)
 class TokenSpeedConfig(HarnessConfig):
     """Core policy settings plus an optional explicit per-batch chain schedule."""
 
     chain_width_table: tuple[tuple[int, int], ...] = ()
 
-
-STATIC = TokenSpeedConfig(mode=Mode.STATIC)
+    @property
+    def fully_scheduled(self) -> bool:
+        """A chain schedule from batch size 1 up: it sets every verify width, so serve mode needs no cost data."""
+        return bool(self.chain_width_table) and self.chain_width_table[0][0] == 1
 
 
 def parse_algorithm_config(algorithm_config: Mapping[str, Any] | None) -> TokenSpeedConfig:
-    """The HarnessConfig of a launch (None: no ``--speculative-algorithm-config``); unknown keys and modes TokenSpeed
-    cannot serve raise."""
-    if algorithm_config is None:
-        return STATIC
-    values = dict(algorithm_config)
+    """The TokenSpeedConfig of a launch (None: no ``--speculative-algorithm-config``, read as ``{}``). Serve is the
+    default mode, as in :class:`HarnessConfig`; unknown keys and modes TokenSpeed cannot serve raise."""
+    values = dict(algorithm_config or {})
     table = values.pop("chain_width_table", ())
     if not isinstance(table, (list, tuple)):
         raise ValueError("chain_width_table must contain [minimum batch size, verify width] pairs")  # noqa: TRY004 — configuration validation
@@ -52,21 +55,17 @@ def parse_algorithm_config(algorithm_config: Mapping[str, Any] | None) -> TokenS
         ):
             raise ValueError("chain_width_table needs increasing positive batch sizes and verify widths >= 2")
         entries.append(tuple(entry))
-    fully_scheduled = bool(entries and entries[0][0] == 1 and values.get("mode") == "serve"
-                           and values.get("intensity") == "chain_intensity")
-    # A complete explicit schedule makes no cost decisions and needs no timing files.
-    core = harness_config_from_dict({**values, "mode": "static"} if fully_scheduled else values)
-    if fully_scheduled:
-        core = replace(core, mode=Mode.SERVE)
-    if core.mode is Mode.SERVE and not fully_scheduled and not core.data_path:
-        raise ValueError("TokenSpeed serve mode needs data_path or a complete explicit chain schedule; live costs are unsupported")
+    core = harness_config_from_dict(values)
     config = TokenSpeedConfig(**{field.name: getattr(core, field.name) for field in fields(core)},
                               chain_width_table=tuple(entries))
-    if entries:
-        from eagle_harness.core.limits import ComputeIntensity
-
-        if config.intensity is not ComputeIntensity.CHAIN or config.mode is not Mode.SERVE:
-            raise ValueError("chain_width_table requires serve mode and chain_intensity")
     if config.mode not in (Mode.STATIC, Mode.SERVE):
         raise NotImplementedError(f"{ALGORITHM_NAME} on TokenSpeed supports static and serve modes")
+    if entries and (config.intensity is not ComputeIntensity.CHAIN or config.mode is not Mode.SERVE):
+        raise ValueError("chain_width_table requires serve mode and chain_intensity")
+    if config.mode is Mode.SERVE and not config.fully_scheduled and not config.data_path:
+        raise ValueError(
+            "TokenSpeed serve mode (the default) needs data_path or a complete explicit chain schedule "
+            '(chain_intensity with a chain_width_table from batch size 1); live costs are unsupported. '
+            'Pass {"mode": "static"} for a fixed tree.'
+        )
     return config

@@ -57,7 +57,8 @@ HOSTS = (
     Host(
         "tokenspeed",
         SpecifierSet(">=0.1.1,<0.2"),  # = the `tokenspeed` extra in pyproject.toml
-        "TokenSpeed 0.1.1+eagle.4 with eagle-harness plugin hooks (see docs/install.md)",
+        "TokenSpeed 0.1.1+eagle.4 (release hooks), or a TokenSpeed with the plugin capabilities in "
+        "eagle_harness.tokenspeed.hooks (see docs/install.md)",
         "eagle_harness.tokenspeed.hooks:hook_problems",
     ),
 )
