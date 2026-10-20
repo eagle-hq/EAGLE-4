@@ -7,7 +7,8 @@ Each :class:`Hook` names an sglang attribute and the parameters the plugin expec
 
 - ``override``: the plugin overrides it, so the parameter names must match exactly (a parameter sglang adds would
   never reach the override);
-- ``call``: the plugin calls it, so the expected names must be among sglang's (sglang may add optional ones);
+- ``call``: the plugin calls it, so the expected names must be among sglang's (sglang may add optional ones); a
+  class means its constructor, whether sglang declares it a dataclass or a ``msgspec.Struct``;
 - ``field``: a field of an sglang argument group (``get_spec()`` and friends) or data class, or a class-level
   default the plugin's subclass sets.
 
@@ -146,8 +147,8 @@ HOOKS: tuple[Hook, ...] = (
         _RUN_VERIFY,
         CALL,
     ),
-    Hook("sglang.srt.speculative.eagle_worker_common:VerifyAcceptInput.__init__", _ACCEPT_INPUT, CALL),
-    Hook("sglang.srt.speculative.eagle_worker_common:VerifyAcceptResult.__init__", _ACCEPT_RESULT, CALL),
+    Hook("sglang.srt.speculative.eagle_worker_common:VerifyAcceptInput", _ACCEPT_INPUT, CALL),
+    Hook("sglang.srt.speculative.eagle_worker_common:VerifyAcceptResult", _ACCEPT_RESULT, CALL),
     # The EAGLE V2 worker the cost-model worker extends (prefill, pools, backends stay sglang's).
     Hook(f"{_WORKER}.__init__", ("server_args", "gpu_id", "nccl_port", "target_worker"), CALL),
     Hook(
@@ -179,8 +180,24 @@ def resolve(path: str):
     return obj
 
 
+def first_present(*paths: str):
+    """The object at the first of ``paths`` the installed sglang has (for a name sglang has moved)."""
+    for path in paths:
+        try:
+            return resolve(path)
+        except (ImportError, AttributeError):
+            continue
+    raise ImportError(f"sglang has none of {', '.join(paths)}")
+
+
+def field_names(cls) -> tuple[str, ...]:
+    """The fields of a dataclass or ``msgspec.Struct`` (empty for other classes)."""
+    return (*getattr(cls, "__struct_fields__", ()), *getattr(cls, "__dataclass_fields__", ()))
+
+
 def parameter_names(func) -> tuple[str, ...]:
-    """Parameter names of ``func`` after ``self`` / ``cls`` (``*args`` / ``**kwargs`` excluded)."""
+    """Parameter names of ``func`` after ``self`` / ``cls`` (``*args`` / ``**kwargs`` excluded); for a class, of
+    its constructor."""
     params = [
         p
         for p in inspect.signature(func).parameters.values()
@@ -196,7 +213,7 @@ def _problem(hook: Hook) -> str | None:
         cls_path, _, name = hook.path.rpartition(".")
         try:
             cls = resolve(cls_path)
-            fields = (*getattr(cls, "__struct_fields__", ()), *getattr(cls, "__dataclass_fields__", ()))
+            fields = field_names(cls)
         except (ImportError, AttributeError):
             return f"{cls_path} is missing"
         return None if name in fields or name in vars(cls) else f"{hook.path} is missing"

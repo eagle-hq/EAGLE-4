@@ -104,3 +104,69 @@ def test_register_on_a_matching_sglang(clean_registry):
     assert plugin.register() is True
     assert plugin.register() is True  # idempotent
     assert SpeculativeAlgorithm.from_string(ALGORITHM_NAME).is_eagle()
+
+
+def _fake_module(monkeypatch, name, **attrs):
+    import sys
+    import types
+
+    module = types.ModuleType(name)
+    module.__dict__.update(attrs)
+    monkeypatch.setitem(sys.modules, name, module)
+    return module
+
+
+@pytest.mark.parametrize("shape", ["dataclass", "msgspec"])
+def test_a_constructed_type_is_checked_by_its_fields(monkeypatch, shape):
+    """sglang declares the accept step's input/result as dataclasses (eagle/v1) or ``msgspec.Struct`` (main)."""
+    if shape == "dataclass":
+        import dataclasses
+
+        @dataclasses.dataclass(frozen=True)
+        class Result:
+            next_token_ids: int
+            accept_lens: int
+            hidden_states: object = None
+
+    else:
+        msgspec = pytest.importorskip("msgspec")
+
+        class Result(msgspec.Struct, frozen=True):
+            next_token_ids: int
+            accept_lens: int
+            hidden_states: object = None
+
+    _fake_module(monkeypatch, "fake_sglang_types", Result=Result)
+    assert hooks.field_names(Result) == ("next_token_ids", "accept_lens", "hidden_states")
+    monkeypatch.setattr(
+        hooks,
+        "HOOKS",
+        (
+            hooks.Hook("fake_sglang_types:Result", ("next_token_ids", "accept_lens"), hooks.CALL),
+            hooks.Hook("fake_sglang_types:Result", ("next_token_ids", "bonus_tokens"), hooks.CALL),
+            hooks.Hook("fake_sglang_types:Result.accept_lens", (), hooks.FIELD),
+        ),
+    )
+    assert hooks.hook_problems() == [
+        "fake_sglang_types:Result('next_token_ids', 'accept_lens', 'hidden_states') lacks ('bonus_tokens',)"
+    ]
+
+
+def test_first_present_takes_the_first_location_sglang_has(monkeypatch):
+    """A kernel sglang moved (create_flashinfer_kv_indices_triton) resolves at its new or its old home."""
+    _fake_module(monkeypatch, "fake_sglang_old", kernel="old")
+    _fake_module(monkeypatch, "fake_sglang_new", kernel="new")
+    assert hooks.first_present("fake_sglang_new:kernel", "fake_sglang_old:kernel") == "new"
+    assert hooks.first_present("fake_sglang_gone:kernel", "fake_sglang_old:kernel") == "old"
+    assert hooks.first_present("fake_sglang_new:gone", "fake_sglang_old:kernel") == "old"
+    with pytest.raises(ImportError, match="none of fake_sglang_gone:kernel"):
+        hooks.first_present("fake_sglang_gone:kernel")
+
+
+def test_the_verify_input_uses_the_installed_kv_indices_kernel():
+    from eagle_harness.sglang import verify_input
+
+    assert verify_input.create_flashinfer_kv_indices_triton is hooks.first_present(
+        "sglang.kernels.ops.attention.kv_indices:create_flashinfer_kv_indices_triton",
+        "sglang.kernels.ops.attention.utils:create_flashinfer_kv_indices_triton",
+    )

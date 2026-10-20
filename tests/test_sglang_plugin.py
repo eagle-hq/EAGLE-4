@@ -33,7 +33,7 @@ from sglang.srt.speculative.spec_registry import _REGISTRY  # noqa: E402
 
 import eagle_harness  # noqa: E402
 from eagle_harness.core.config import parse_harness_config  # noqa: E402
-from eagle_harness.sglang import plugin  # noqa: E402
+from eagle_harness.sglang import hooks, plugin  # noqa: E402
 from eagle_harness.sglang.algorithm import ALGORITHM_NAME, EagleHarnessSpecAlgo  # noqa: E402
 from eagle_harness.sglang.l2_warm import MlpL2WarmAhead  # noqa: E402
 from eagle_harness.sglang.verify_graphs import VerifyWidthGraphs, round_up_width, verify_widths  # noqa: E402
@@ -366,7 +366,7 @@ def test_mamba2_tree_verify_follows_the_state_layout(registered):
     from eagle_harness.sglang.gdn_tree_verify import GDNTreeVerify
     from eagle_harness.sglang.mamba2_tree_verify import Mamba2TreeVerify
 
-    if "kind" not in LinearAttnStateLayout.__dataclass_fields__:
+    if "kind" not in hooks.field_names(LinearAttnStateLayout):
         pytest.skip("this sglang asks GDN backends only")
     registered.__dict__["config"] = parse_harness_config(CONFIG)
     state = dict(

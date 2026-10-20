@@ -17,9 +17,10 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 
-from sglang.kernels.ops.attention.utils import create_flashinfer_kv_indices_triton
 from sglang.srt.mem_cache.kv_loc_plan import IdSpaceKind
 from sglang.srt.speculative.eagle_info import EagleVerifyInput
+
+from eagle_harness.sglang.hooks import first_present
 
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.kv_index_translator import KVIndexTranslator
@@ -27,6 +28,12 @@ if TYPE_CHECKING:
     from sglang.srt.speculative.spec_info import FlashInferVerifyVariant
 
     from eagle_harness.sglang.verify_plan import TreeTailMask
+
+# sglang main keeps the kernel in its own module; the eagle/v1 release re-exports it from the attention utils.
+create_flashinfer_kv_indices_triton = first_present(
+    "sglang.kernels.ops.attention.kv_indices:create_flashinfer_kv_indices_triton",
+    "sglang.kernels.ops.attention.utils:create_flashinfer_kv_indices_triton",
+)
 
 
 def build_attn_args(
