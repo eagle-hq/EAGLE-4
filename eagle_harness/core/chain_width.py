@@ -46,6 +46,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from eagle_harness.core.cost_table import BatchCostTable, CostCurve, load_cost_tables
 from eagle_harness.core.limits import nearest_cost_batch_size
+from eagle_harness.core.live_costs import CostKey, check_key
 
 PROFILE_FILE = os.path.join("accept", "chain.json")
 ROUNDS_FILE = os.path.join("rounds", "chain.json")
@@ -216,13 +217,21 @@ def save_round_times(data_path: str, rows: Sequence[Mapping[str, float]]) -> str
 
 
 def chain_widths(
-    data_path: str, max_width: int, max_batch_size: int, *, allow_no_spec: bool = False
+    data_path: str,
+    max_width: int,
+    max_batch_size: int,
+    *,
+    allow_no_spec: bool = False,
+    key: Optional[CostKey] = None,
 ) -> Optional[List[Tuple[int, int, int]]]:
     """The chain widths per batch size range under ``data_path``: from the served round times when measured, else
-    from the cost tables; both need the acceptance profile. None when either part is missing."""
+    from the cost tables; both need the acceptance profile. None when either part is missing. With the server's
+    ``key``, a directory measured on another setup is refused (:func:`~eagle_harness.core.live_costs.check_key`)."""
     profile = load_accept_profile(data_path)
     if profile is None:
         return None
+    if key is not None:
+        check_key(data_path, key)
     rounds = load_round_times(data_path)
     if rounds is not None:
         return served_width_schedule(rounds, profile, max_width, max_batch_size, allow_no_spec=allow_no_spec)
@@ -271,13 +280,18 @@ def _check_tree_row(row: Mapping[str, float]) -> None:
         )
 
 
-def load_tree_rounds(data_path: str) -> Optional[Dict[int, Dict[int, Tuple[float, float]]]]:
-    """``{batch size: {width: (round us, accept)}}`` from ``<data_path>/rounds/tree.json``, None if not measured."""
+def load_tree_rounds(
+    data_path: str, key: Optional[CostKey] = None
+) -> Optional[Dict[int, Dict[int, Tuple[float, float]]]]:
+    """``{batch size: {width: (round us, accept)}}`` from ``<data_path>/rounds/tree.json``, None if not measured.
+    With the server's ``key``, rounds measured on another setup are refused (as by :func:`chain_widths`)."""
     try:
         with open(os.path.join(data_path, TREE_ROUNDS_FILE), encoding="utf-8") as f:
             rows = json.load(f)["rounds"]
     except FileNotFoundError:
         return None
+    if key is not None:
+        check_key(data_path, key)
     rounds: Dict[int, Dict[int, Tuple[float, float]]] = {}
     for row in rows:
         _check_tree_row(row)

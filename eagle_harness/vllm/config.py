@@ -54,6 +54,7 @@ from eagle_harness.core.limits import (
     req_to_token_span,
     verify_buckets,
 )
+from eagle_harness.core.live_costs import CostKey
 
 METHOD_NAME = "eagle_harness"
 # Keys of ``method_config`` that are not HarnessConfig fields.
@@ -148,11 +149,17 @@ def verify_width_schedule(
 
 
 def _verify_widths(
-    intensity: ComputeIntensity, max_verify_width: int, data_path: str | None, *, allow_unpriced: bool
+    intensity: ComputeIntensity,
+    max_verify_width: int,
+    data_path: str | None,
+    *,
+    allow_unpriced: bool,
+    key: CostKey | None = None,
 ) -> List[Tuple[int, int, int]]:
     limit = max_batch_size(intensity)
-    widths = derived_chain_widths(data_path, max_verify_width, limit) if intensity is ComputeIntensity.CHAIN else None
-    if widths is None and intensity is ComputeIntensity.CHAIN and not allow_unpriced:
+    chain = intensity is ComputeIntensity.CHAIN
+    widths = derived_chain_widths(data_path, max_verify_width, limit, key) if chain else None
+    if widths is None and chain and not allow_unpriced:
         raise ValueError(
             f"eagle_harness: no priced chain schedule with an acceptance profile under {data_path} "
             f"({PROFILE_FILE}); calibrate the chain or explicitly set max_verify_width for a fixed unpriced chain."
@@ -174,12 +181,14 @@ def _draft_token_schedule(widths: List[Tuple[int, int, int]], limit: int) -> Lis
     return ranges
 
 
-def derived_chain_widths(data_path: str | None, max_verify_width: int, limit: int) -> List[Tuple[int, int, int]] | None:
+def derived_chain_widths(
+    data_path: str | None, max_verify_width: int, limit: int, key: CostKey | None = None
+) -> List[Tuple[int, int, int]] | None:
     """The chain widths per batch size range priced by the served round times (else the cost tables) and the acceptance
     profile under ``data_path`` (:func:`eagle_harness.core.chain_width.chain_widths`); None when missing."""
     if not data_path:
         return None
-    widths = chain_widths(data_path, max_verify_width, limit, allow_no_spec=True)
+    widths = chain_widths(data_path, max_verify_width, limit, allow_no_spec=True, key=key)
 
     if widths is not None:
         logger.info("eagle_harness: chain widths per batch size from %s: %s", data_path, widths)
@@ -277,10 +286,10 @@ def native_decode_ranges(spec_config: Any) -> List[Tuple[int, int]]:
     return _native_ranges(widths)
 
 
-def measured_tree_schedule(parsed: VllmMethodConfig) -> List[Tuple[int, int, int]] | None:
+def measured_tree_schedule(parsed: VllmMethodConfig, key: CostKey | None = None) -> List[Tuple[int, int, int]] | None:
     """The static tree's draft-count schedule from served rounds under ``data_path`` (None: one width throughout)."""
     data_path = parsed.harness.data_path
-    rounds = load_tree_rounds(data_path) if data_path else None
+    rounds = load_tree_rounds(data_path, key) if data_path else None
     if not rounds:
         return None
     limit = max_batch_size(parsed.harness.intensity)
@@ -289,6 +298,18 @@ def measured_tree_schedule(parsed: VllmMethodConfig) -> List[Tuple[int, int, int
         return None
     logger.info("eagle_harness: tree verify width per batch size from %s: %s", data_path, widths)
     return _draft_token_schedule(widths, limit)
+
+
+def check_data_key(spec_config: Any, key: CostKey) -> None:
+    """Refuse a ``data_path`` measured on another setup: re-read what :func:`configure_speculative_config` sized the
+    schedule from, with this server's ``key``. Configure runs in the API process, which cannot name the GPU, so every
+    worker checks before it serves."""
+    parsed = parse_method_config(spec_config.method_config)
+    harness = parsed.harness
+    if harness.mode.uses_cost_model:
+        _verify_widths(harness.intensity, parsed.max_verify_width, harness.data_path, allow_unpriced=True, key=key)
+    elif parsed.node_top_k > 1:
+        measured_tree_schedule(parsed, key)
 
 
 def num_lookahead_tokens(spec_config: Any) -> int:

@@ -136,6 +136,44 @@ def test_offline_tables_are_refused_on_another_setup(tmp_path, caplog):
     assert json.load(open(tmp_path / "key.json"))["gpu"] == "NVIDIA B300"
 
 
+def test_every_calibration_reader_refuses_another_setup(tmp_path):
+    """A directory measured on B300/TP4 is refused by an H200/TP8 server on each path that reads it, as the cost
+    tables are: the served chain widths, the vLLM tree rounds, and the vLLM worker's re-read of both."""
+    from types import SimpleNamespace
+
+    from eagle_harness.core.chain_width import (
+        chain_widths,
+        load_tree_rounds,
+        merge_tree_rounds,
+        save_accept_profile,
+        save_round_times,
+    )
+    from eagle_harness.vllm.config import check_data_key
+
+    data_path = str(tmp_path)
+    b300 = CostKey("NVIDIA B300", 4, "qwen:abc", "eagle4:def", "vllm 0.11.1", "torch.bfloat16")
+    h200 = CostKey("NVIDIA H200", 8, "qwen:abc", "eagle4:def", "vllm 0.11.1", "torch.bfloat16")
+    write_key(data_path, b300)
+    save_accept_profile(data_path, 100, [90, 80, 70])
+    rows = [{"batch_size": 1, "width": w, "round_us": us, "count": 10} for w, us in ((1, 900.0), (4, 1000.0))]
+    save_round_times(data_path, rows)
+    merge_tree_rounds(data_path, [{"batch_size": 64, "width": 16, "round_us": 48000.0, "accept": 4.0, "count": 10}])
+    chain = SimpleNamespace(method_config={"intensity": "chain_intensity", "data_path": data_path})
+    tree = SimpleNamespace(method_config={"mode": "static", "max_verify_width": 16, "data_path": data_path})
+    assert chain_widths(data_path, 4, 8, key=b300) == [(1, 8, 4)]
+    assert load_tree_rounds(data_path, b300) == {64: {16: (48000.0, 4.0)}}
+    check_data_key(chain, b300)
+    check_data_key(tree, b300)
+    for read in (
+        lambda: chain_widths(data_path, 4, 8, key=h200),
+        lambda: load_tree_rounds(data_path, h200),
+        lambda: check_data_key(chain, h200),
+        lambda: check_data_key(tree, h200),
+    ):
+        with pytest.raises(ValueError, match="another setup.*'gpu_count': \\(4, 8\\)"):
+            read()
+
+
 def test_offline_tables_are_validated_and_keyed_at_load(tmp_path):
     """A table the cost model could not decide from fails at load with the directory, not in a decode round."""
     from eagle_harness.core.config import HarnessConfig, build_cost_model

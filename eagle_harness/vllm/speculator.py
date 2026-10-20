@@ -42,7 +42,13 @@ from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import SpeculatorCudaGraphManager
 
 from eagle_harness.vllm.batch_policy import BatchPolicy, host_speculator_hooks
-from eagle_harness.vllm.config import DERIVED, VllmMethodConfig, native_decode_ranges, parse_method_config
+from eagle_harness.vllm.config import (
+    DERIVED,
+    VllmMethodConfig,
+    check_data_key,
+    native_decode_ranges,
+    parse_method_config,
+)
 from eagle_harness.vllm.depth_stop import derived_cost_tables
 from eagle_harness.vllm.gdn_tree_verify import LinearStateCommit, check_tree_verifiable
 from eagle_harness.vllm.round_commit import KvCompactor, chainize
@@ -88,22 +94,23 @@ class HarnessSpeculator(EagleSpeculator):
                 )
 
     def load_model(self, target_model: Any) -> None:
+        key = None
+        if self.method_config.harness.data_path:
+            from eagle_harness.vllm.calibrate import cost_key
+
+            vc = self.vllm_config
+            key = cost_key(
+                vc.model_config.model,
+                vc.speculative_config.draft_model_config.model,
+                vc.parallel_config.tensor_parallel_size,
+                vc.model_config.dtype,
+            )
+            check_data_key(self.speculative_config, key)
         super().load_model(target_model)
         if self.tree_mode:
             (self.draft_layer_name,) = self.draft_attn_layer_names
             layer = self.vllm_config.compilation_config.static_forward_context[self.draft_layer_name]
             gain = self.method_config.depth_stop_gain
-            key = None
-            if gain == DERIVED and self.method_config.harness.data_path:
-                from eagle_harness.vllm.calibrate import cost_key
-
-                vc = self.vllm_config
-                key = cost_key(
-                    vc.model_config.model,
-                    vc.speculative_config.draft_model_config.model,
-                    vc.parallel_config.tensor_parallel_size,
-                    vc.model_config.dtype,
-                )
             self.drafter = TreeDrafter(
                 self.model,
                 layer,
