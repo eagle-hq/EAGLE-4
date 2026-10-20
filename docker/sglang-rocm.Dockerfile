@@ -2,20 +2,22 @@
 # Copyright 2026 Eagle AI Corp.
 # SPDX-License-Identifier: LicenseRef-Eagle-4-Source-Available
 
-# Sketch only. Supply an approved Python 3.10 / ROCm 7.2 MI355X base
-# with matching PyTorch, Triton, AITER and FlyDSL already installed.
-# No default tag is invented. This file has not been built or served.
-ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
-COPY pyproject.toml README.md LICENSE NOTICE TRADEMARKS.md THIRD_PARTY_NOTICES.md /src/
-COPY LICENSES/ /src/LICENSES/
-COPY eagle_harness/ /src/eagle_harness/
-COPY docs/release.env /opt/eagle-release.env
-RUN . /opt/eagle-release.env \
-    && python3 -c 'import sys, torch; assert sys.version_info[:2] == (3, 10); assert torch.version.hip' \
-    && python3 -m pip install --no-cache-dir --no-deps --extra-index-url "$EAGLE_ROCM_INDEX" \
-      "sglang==$EAGLE_ROCM_VERSION" \
-    && python3 -m pip install --no-cache-dir --no-deps --force-reinstall /src \
-    && eagle-harness calibrate --help
+# lmsysorg/sglang:v0.5.20-rocm720-mi35x, Ubuntu 22.04 / CPython 3.10.
+# Build with --build-context rocm-wheels=/path/to/rocm/wheels.
+# Image construction/runtime still require separate container qualification.
+FROM lmsysorg/sglang@sha256:ef84c44150da0f90495953458e7386350ffc50a37b2b9ac6802d9a94c454c6dd
+COPY docker/rocm/constraints.txt docker/rocm/requirements.lock /opt/eagle/rocm/
+# Isolate the locked closure from the base image's editable SGLang and packages.
+RUN --mount=type=bind,from=rocm-wheels,target=/wheels \
+    python3 -c 'import sys; assert sys.version_info[:2] == (3, 10)' \
+    && python3 -m venv /opt/eagle/venv \
+    && /opt/eagle/venv/bin/python -m pip install --no-cache-dir --no-index \
+      --find-links /wheels --require-hashes -r /opt/eagle/rocm/requirements.lock \
+    && /opt/eagle/venv/bin/python -m pip check
+ENV PATH="/opt/eagle/venv/bin:${PATH}" \
+    PYTHONPATH="" \
+    PYTHONNOUSERSITE=1
+WORKDIR /opt/eagle
+CMD ["bash"]
 # Run eagle-harness-check with /dev/kfd and /dev/dri available, then follow
-# docs/quickstart-amd.md. A CPU build-time import is not GPU qualification.
+# docs/quickstart-amd.md. A CPU build-time install is not GPU qualification.

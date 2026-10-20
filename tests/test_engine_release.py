@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 from urllib.parse import unquote
@@ -134,12 +135,68 @@ def test_upload_verify_rerun_and_pages_without_wheel_payloads(tmp_path, release)
         assert ("eagle.4.rocm" in page) == (channel == "rocm")
 
 
+@pytest.fixture
+def rocm_runtime(tmp_path, monkeypatch):
+    source = tmp_path / "audited-source"
+    (source / "tools").mkdir(parents=True)
+    (source / "docker/rocm").mkdir(parents=True)
+    for name in ("engine_release.py", "mk_index.py"):
+        shutil.copyfile(REPO / "tools" / name, source / "tools" / name)
+    monkeypatch.setattr(sys.modules[__name__], "TOOL", source / "tools/engine_release.py")
+    artifacts = wheels(tmp_path, "rocm")
+    torch = tmp_path / "torch-2.9.1-py3-none-any.whl"
+    with zipfile.ZipFile(torch, "w") as archive:
+        archive.writestr("torch.dist-info/METADATA", "Name: torch\nVersion: 2.9.1\n")
+    artifacts.append(torch)
+    lock = source / "docker/rocm/requirements.lock"
+    lock.write_text("".join(
+        f"{p.name.split('-')[0]}=={p.name.split('-')[1]} --hash=sha256:{hashlib.sha256(p.read_bytes()).hexdigest()}\n"
+        for p in artifacts
+    ))
+    return artifacts, lock
+
+
+def test_runtime_upload_verifies_complete_locked_bundle(tmp_path, release, rocm_runtime):
+    remote, log = release
+    artifacts, _ = rocm_runtime
+    result = command("upload", TAG, "rocm-runtime", *artifacts)
+    assert result.returncode == 0, result.stderr
+    assert {p.name for p in remote.iterdir()} == {p.name for p in artifacts} | {"runtime-rocm-SHA256SUMS"}
+    uploads = [args[3] for args in calls(log) if args[1] == "upload"]
+    assert Path(uploads[-1]).name == "runtime-rocm-SHA256SUMS"
+    assert command("upload", TAG, "rocm-runtime", *artifacts).returncode == 0
+    assert [args[3] for args in calls(log) if args[1] == "upload"] == uploads
+    for artifact in artifacts:
+        assert (remote / artifact.name).read_bytes() == artifact.read_bytes()
+
+
+@pytest.mark.parametrize("case", ["missing", "wrong-version", "empty-lock", "unhashed", "duplicate-lock"])
+def test_runtime_upload_rejects_bad_closure_before_github(release, rocm_runtime, case):
+    _, log = release
+    artifacts, lock = rocm_runtime
+    if case == "missing":
+        artifacts = artifacts[:1]
+    elif case == "wrong-version":
+        lock.write_text(lock.read_text().replace("torch==2.9.1", "torch==2.9.2"))
+    elif case == "empty-lock":
+        lock.write_text("")
+    elif case == "unhashed":
+        lock.write_text("torch==2.9.1\n")
+    else:
+        lock.write_text(lock.read_text() * 2)
+    result = command("upload", TAG, "rocm-runtime", *artifacts)
+    assert result.returncode != 0
+    assert "ROCm" in result.stderr
+    assert not log.exists()
+
+
 def test_pages_publishes_only_released_channels(tmp_path, release):
     remote, _ = release
     artifacts = wheels(tmp_path, "cu130")
     assert command("upload", TAG, "cu130", *artifacts).returncode == 0
-    # Neither a harness manifest nor an unknown platform's manifest is an index channel.
+    # Neither a harness or ROCm runtime manifest nor an unknown platform's manifest is an index channel.
     (remote / "harness-SHA256SUMS").write_text(f"{'0' * 64}  eagle_harness-0.1.0-py3-none-any.whl\n")
+    (remote / "runtime-rocm-SHA256SUMS").write_text(f"{'0' * 64}  torch-2.9.1-py3-none-any.whl\n")
     (remote / "engine-cu999-SHA256SUMS").write_text(f"{'0' * 64}  invented-0.1.0-py3-none-any.whl\n")
     site = tmp_path / "site"
     result = command("pages", TAG, site)

@@ -23,7 +23,8 @@ import mk_index
 REPOSITORY = "eagle-hq/EAGLE-4"
 CHANNELS = ("cu130", "rocm")
 CHANNEL_LABELS = {"cu130": "CUDA 13.0", "rocm": "ROCm"}
-UPLOAD_CHANNELS = (*CHANNELS, "harness")
+UPLOAD_CHANNELS = (*CHANNELS, "harness", "rocm-runtime")
+ROCM_LOCK = Path(__file__).resolve().parents[1] / "docker/rocm/requirements.lock"
 REQUIRED = {
     "harness": {"eagle-harness"},
     "cu130": {"sglang", "vllm", "tokenspeed", "tokenspeed-kernel", "tokenspeed-scheduler"},
@@ -42,10 +43,46 @@ def gh(*args: str, repository: str = REPOSITORY) -> str:
 
 
 def manifest_name(channel: str) -> str:
+    if channel == "rocm-runtime":
+        return "runtime-rocm-SHA256SUMS"
     return "harness-SHA256SUMS" if channel == "harness" else f"engine-{channel}-SHA256SUMS"
 
 
-def validate_wheels(channel: str, wheels: list[Path]) -> None:
+def validate_rocm_runtime(wheels: list[Path], lock: Path) -> None:
+    expected = {}
+    for line in lock.read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"([A-Za-z0-9_.-]+)==(\S+) --hash=sha256:([a-f0-9]{64})", line)
+        if not match:
+            raise ValueError(f"invalid pinned ROCm requirement: {line!r}")
+        project = mk_index.normalize(match[1])
+        if project in expected:
+            raise ValueError(f"duplicate locked ROCm package: {project}")
+        expected[project] = (match[2], match[3])
+    if not expected:
+        raise ValueError("empty ROCm runtime lock")
+    actual = {}
+    for wheel in wheels:
+        if not WHEEL_NAME.fullmatch(wheel.name):
+            raise ValueError(f"invalid wheel filename: {wheel.name}")
+        meta = mk_index.metadata(wheel)
+        project = mk_index.normalize(meta["name"])
+        if project in actual:
+            raise ValueError(f"duplicate ROCm runtime package: {project}")
+        if expected.get(project) != (meta["version"], mk_index.sha256(wheel)):
+            raise ValueError(f"wheel does not match ROCm runtime lock: {wheel.name}")
+        actual[project] = wheel
+    missing = expected.keys() - actual.keys()
+    if missing:
+        raise ValueError(f"missing locked ROCm packages: {', '.join(sorted(missing))}")
+    validate_wheels("rocm", [actual["sglang"]] if "sglang" in actual else [])
+
+
+def validate_wheels(channel: str, wheels: list[Path], *, rocm_lock: Path | None = None) -> None:
+    if channel == "rocm-runtime":
+        validate_rocm_runtime(wheels, rocm_lock if rocm_lock is not None else ROCM_LOCK)
+        return
     names = set()
     projects = set()
     for wheel in wheels:
