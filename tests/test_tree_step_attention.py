@@ -1,8 +1,7 @@
 # Copyright 2026 Eagle AI Corp.
 # SPDX-License-Identifier: LicenseRef-Eagle-4-Source-Available
 
-"""A draft step's shared-key attention (:func:`tree_step_attention`) against the per-row path it replaces
-(:func:`build_tree_rows` + :func:`row_attention`) and a dense torch reference."""
+"""A draft step's shared-key attention (:func:`tree_step_attention`) against a dense torch reference."""
 
 import pytest
 import torch
@@ -40,28 +39,27 @@ def _case(bs, top_k, heads, d, step, committed, window, cache_block=16, per_tabl
     [(1, 1, [70], 0), (2, 3, [5, 200], 0), (1, 4, [300], 100), (2, 2, [129, 64], 64)],
 )
 @pytest.mark.parametrize("group_size", [1, 2, 4, 8])
-def test_tree_step_attention_matches_the_per_row_kernel(bs, step, committed, window, group_size):
-    from eagle_harness.vllm.draft_attention import build_tree_rows, row_attention, tree_step_attention
+def test_tree_step_attention_matches_dense_torch(bs, step, committed, window, group_size):
+    from eagle_harness.vllm.draft_attention import tree_step_attention
 
     top_k, heads, d = 4, 8, 64
     kv_heads = heads // group_size
     q, kv, table, table_block, committed_t, ancestors = _case(
         bs, top_k, heads, d, step, committed, window, kv_heads=kv_heads
     )
-    keys = torch.zeros(bs * top_k, 512, dtype=torch.int32, device=DEV)
-    num_keys = torch.zeros(bs * top_k, dtype=torch.int32, device=DEV)
-    build_tree_rows(table, table_block, committed_t, ancestors, keys, num_keys, step=step, window=window)
-    want = row_attention(q, kv, keys, num_keys, d**-0.5)
     got = tree_step_attention(q, kv, table, table_block, committed_t, ancestors, d**-0.5, step=step, window=window)
-    torch.testing.assert_close(got.float(), want.float(), atol=2e-2, rtol=2e-2)
-    # dense reference of one row: the last row of the last request
-    r = bs * top_k - 1
-    n = int(num_keys[r])
-    slots = keys[r, :n].long()
-    flat = kv.reshape(-1, kv_heads, 2 * d)[slots].repeat_interleave(group_size, dim=1)
-    scores = torch.einsum("hd,khd->hk", q[r].float(), flat[..., :d].float()) * d**-0.5
-    dense = torch.einsum("hk,khd->hd", scores.softmax(-1), flat[..., d:].float())
-    torch.testing.assert_close(got[r].float(), dense, atol=2e-2, rtol=2e-2)
+    flat = kv.reshape(-1, kv_heads, 2 * d).repeat_interleave(group_size, dim=1).float()
+    for b in range(bs):
+        # each row sees the committed keys inside the window of its position c + step - 1, then its own ancestors
+        c = committed[b]
+        start = min(max(0, c + step - window), c) if window else 0
+        prefix = [int(table[b, p // table_block]) * table_block + p % table_block for p in range(start, c)]
+        for lane in range(top_k):
+            r = b * top_k + lane
+            slots = torch.tensor(prefix + ancestors[b, lane, :step].tolist(), device=DEV)
+            scores = torch.einsum("hd,khd->hk", q[r].float(), flat[slots, :, :d]) * d**-0.5
+            dense = torch.einsum("hk,khd->hd", scores.softmax(-1), flat[slots, :, d:])
+            torch.testing.assert_close(got[r].float(), dense, atol=2e-2, rtol=2e-2)
 
 
 @needs_triton
@@ -136,11 +134,9 @@ def test_shared_rows_gqa_matches_torch_and_repeated_mha(group_size, packed, step
 @needs_triton
 @pytest.mark.parametrize("kv_heads", [0, 3, 16])
 def test_rows_reject_nonintegral_query_groups(kv_heads):
-    from eagle_harness.vllm.draft_attention import row_attention, tree_step_attention
+    from eagle_harness.vllm.draft_attention import tree_step_attention
 
     q, cache, table, table_block, lengths, ancestors = _case(1, 4, 8, 64, 1, [70], 0)
     invalid = torch.empty(cache.shape[0], cache.shape[1], kv_heads, cache.shape[3], device=DEV)
     with pytest.raises(ValueError, match="must be divisible"):
         tree_step_attention(q, invalid, table, table_block, lengths, ancestors, 0.125, step=1, window=0)
-    with pytest.raises(ValueError, match="must be divisible"):
-        row_attention(q, invalid, table, lengths, 0.125)

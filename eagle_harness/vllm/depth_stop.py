@@ -130,30 +130,6 @@ def derived_cost_tables(
     return tables
 
 
-def keep_growing_reference(
-    scores: torch.Tensor,
-    decay: torch.Tensor,
-    front: torch.Tensor,
-    count: int,
-    next_decay: float,
-    min_gain: float,
-    parent_layer: tuple[int, int],
-    step_share: float = 0.0,
-) -> torch.Tensor:
-    """The rule in torch: ``scores`` ``[bs, nodes]`` (0 where no node was grown), ``decay`` ``[nodes]``, ``front``
-    ``[bs, K]`` the frontier's scores (the newest layer's best), ``parent_layer`` the node range of the layer above the
-    newest, ``step_share`` :meth:`RoundCosts.step_share`; a scalar bool."""
-    ranked = torch.sort(scores * decay, dim=-1, descending=True).values
-    threshold = ranked[:, count - 1 : count]
-    reach = front * torch.tensor(next_decay, dtype=torch.float32, device=front.device)
-    parent_best = scores[:, parent_layer[0] : parent_layer[1]].max(-1, keepdim=True).values
-    ratio = front.max(-1, keepdim=True).values / parent_best.clamp(min=1e-30)
-    gain = (reach * ratio - threshold).clamp(min=0).sum(-1)
-    expected = 1.0 + ranked[:, :count].sum(-1)
-    keep = (reach.max(-1).values >= threshold[:, 0]) & (gain >= min_gain + step_share * expected)
-    return keep.any()
-
-
 @triton.jit
 def _keep_growing_kernel(
     scores,

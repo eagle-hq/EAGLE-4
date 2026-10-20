@@ -44,11 +44,34 @@ def _probs(gen: torch.Generator, rows: int, sharpness: torch.Tensor) -> torch.Te
     return torch.topk(logits.softmax(-1), K, dim=-1).values
 
 
+def keep_growing_reference(
+    scores: torch.Tensor,
+    decay: torch.Tensor,
+    front: torch.Tensor,
+    count: int,
+    next_decay: float,
+    min_gain: float,
+    parent_layer: tuple[int, int],
+    step_share: float = 0.0,
+) -> torch.Tensor:
+    """The rule of :func:`~eagle_harness.vllm.depth_stop.keep_growing` in torch: ``scores`` ``[bs, nodes]`` (0 where no
+    node was grown), ``decay`` ``[nodes]``, ``front`` ``[bs, K]`` the frontier's scores (the newest layer's best),
+    ``parent_layer`` the node range of the layer above the newest, ``step_share`` :meth:`RoundCosts.step_share`; a
+    scalar bool."""
+    ranked = torch.sort(scores * decay, dim=-1, descending=True).values
+    threshold = ranked[:, count - 1 : count]
+    reach = front * torch.tensor(next_decay, dtype=torch.float32, device=front.device)
+    parent_best = scores[:, parent_layer[0] : parent_layer[1]].max(-1, keepdim=True).values
+    ratio = front.max(-1, keepdim=True).values / parent_best.clamp(min=1e-30)
+    gain = (reach * ratio - threshold).clamp(min=0).sum(-1)
+    expected = 1.0 + ranked[:, :count].sum(-1)
+    keep = (reach.max(-1).values >= threshold[:, 0]) & (gain >= min_gain + step_share * expected)
+    return keep.any()
+
+
 def _grow(bs: int, count: int, seed: int, min_gain: float | None):
     """Grow a tree on CPU with the reference step; with ``min_gain`` stop as the rule says. Returns
     ``(verify node set per request, steps run)``."""
-    from eagle_harness.vllm.depth_stop import keep_growing_reference
-
     gen = torch.Generator().manual_seed(seed)
     sharp = torch.rand(bs, generator=gen) * 6  # some requests confident, some not
     tree = _tree(bs)
@@ -94,8 +117,6 @@ def test_a_positive_gain_stops_no_later():
 
 
 def test_reference_rule_on_a_hand_made_tree():
-    from eagle_harness.vllm.depth_stop import keep_growing_reference
-
     def keep(front, gain, parent=(1, 2), scores=torch.tensor([[0.9, 0.5, 0.2, 0.1, 0.0]])):
         return bool(keep_growing_reference(scores, torch.ones(5), torch.tensor(front), 3, 1.0, gain, parent))
 
@@ -113,8 +134,6 @@ def test_reference_rule_on_a_hand_made_tree():
 
 
 def test_reference_prices_a_step_by_the_expected_accept():
-    from eagle_harness.vllm.depth_stop import keep_growing_reference
-
     scores = torch.tensor([[0.9, 0.5, 0.2, 0.1, 0.0]])
 
     def keep(share, gain=0.0):
@@ -157,7 +176,7 @@ def test_kernel_prices_a_step_by_the_expected_accept(share, keeps):
     ],
 )
 def test_kernel_matches_the_reference(bs, count, gain, share):
-    from eagle_harness.vllm.depth_stop import keep_growing, keep_growing_reference
+    from eagle_harness.vllm.depth_stop import keep_growing
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     shape = TreeShape(top_k=K, max_depth=DEPTH)

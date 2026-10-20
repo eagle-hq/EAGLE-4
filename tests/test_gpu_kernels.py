@@ -10,7 +10,6 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a G
 # a CPU-only vLLM build lacks the FlashAttention entry points the tree attention imports
 pytest.importorskip("eagle_harness.vllm.tree_attention", reason="needs vLLM's GPU build", exc_type=ImportError)
 
-from eagle_harness.vllm.draft_attention import build_tree_rows, row_attention  # noqa: E402
 from eagle_harness.vllm.round_commit import KvCompactor  # noqa: E402
 from eagle_harness.vllm.verify_layout import TreeStore, VerifyStage  # noqa: E402
 
@@ -63,38 +62,6 @@ def test_stage_depths_masks_and_window_ancestors(parents):
         assert stage.slot_parents[b].tolist() == parents  # request b sits in state slot b
         assert stage.slot_depths[b].tolist() == depth
         assert int(stage.context_lens[b]) == 100  # the first query token's chain position
-
-
-def test_row_attention_matches_dense():
-    torch.manual_seed(0)
-    blocks, block_size, h, d, rows, n = 8, 16, 4, 128, 5, 100
-    stored = torch.randn(blocks, h, block_size, 2 * d, device=DEV, dtype=torch.bfloat16)
-    cache = stored.transpose(1, 2)  # the backend's view: (blocks, slots, heads, 2 * head_dim)
-    q = torch.randn(rows, h, d, device=DEV, dtype=torch.bfloat16)
-    keys = torch.randint(0, blocks * block_size, (rows, n), device=DEV, dtype=torch.int32)
-    num_keys = torch.tensor([n, 1, 37, 64, 99], dtype=torch.int32, device=DEV)
-    out = row_attention(q, cache, keys, num_keys, d**-0.5)
-    flat = cache.reshape(-1, h, 2 * d)
-    for r in range(rows):
-        kv = flat[keys[r, : num_keys[r]].long()].float()
-        scores = torch.einsum("hd,khd->hk", q[r].float(), kv[..., :d]) * d**-0.5
-        want = torch.einsum("hk,khd->hd", scores.softmax(-1), kv[..., d:])
-        torch.testing.assert_close(out[r].float(), want, atol=2e-2, rtol=2e-2)
-
-
-def test_build_tree_rows_window():
-    block_size = 16
-    table = torch.arange(1, 9, dtype=torch.int32, device=DEV)[None].repeat(1, 1)
-    committed = torch.tensor([50], dtype=torch.int32, device=DEV)
-    ancestors = torch.tensor([[[900, 901], [900, 902]]], dtype=torch.int32, device=DEV)  # bs=1, K=2, depth=2
-    keys = torch.zeros(2, 64, dtype=torch.int32, device=DEV)
-    num_keys = torch.zeros(2, dtype=torch.int32, device=DEV)
-    build_tree_rows(table, block_size, committed, ancestors, keys, num_keys, step=2, window=10)
-    # the query at position 51 sees positions 42..51: 8 committed keys (42..49) and its 2 ancestors (50, 51)
-    assert num_keys.tolist() == [10, 10]
-    want = [int(table[0, p // block_size]) * block_size + p % block_size for p in range(42, 50)]
-    assert keys[0, :10].tolist() == want + [900, 901]
-    assert keys[1, :10].tolist() == want + [900, 902]
 
 
 @pytest.mark.parametrize("slot_major", [False, True])  # the order of slots and heads in memory
