@@ -42,7 +42,7 @@ import json
 import os
 import statistics
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from eagle_harness.core.cost_table import BatchCostTable, CostCurve, load_cost_tables
 from eagle_harness.core.limits import nearest_cost_batch_size
@@ -247,16 +247,20 @@ def width_at(schedule: Sequence[Tuple[int, int, int]], batch_size: int) -> int:
     raise ValueError(f"batch size {batch_size} is outside the chain width schedule {list(schedule)}")
 
 
+def merge_ranges(rows: Iterable[Tuple[int, int, int]]) -> List[Tuple[int, int, int]]:
+    """``(first, last, value)`` rows in batch-size order, consecutive rows with the same value merged into one range."""
+    ranges: List[Tuple[int, int, int]] = []
+    for first, last, value in rows:
+        if ranges and ranges[-1][2] == value:
+            ranges[-1] = (ranges[-1][0], last, value)
+        else:
+            ranges.append((first, last, value))
+    return ranges
+
+
 def _ranges(widths: Mapping[int, int], max_batch_size: int) -> List[Tuple[int, int, int]]:
     """Per-batch-size widths of the calibrated batch sizes as ranges over ``1..max_batch_size``."""
-    ranges: List[Tuple[int, int, int]] = []
-    for bs in range(1, max_batch_size + 1):
-        width = widths[nearest_cost_batch_size(bs, widths)]
-        if ranges and ranges[-1][2] == width:
-            ranges[-1] = (ranges[-1][0], bs, width)
-        else:
-            ranges.append((bs, bs, width))
-    return ranges
+    return merge_ranges((bs, bs, widths[nearest_cost_batch_size(bs, widths)]) for bs in range(1, max_batch_size + 1))
 
 
 # ---------------------------------------------------------------- the tree's verify width under load
@@ -350,10 +354,4 @@ def served_tree_schedule(
     ranges = _ranges({bs: w for bs, w in choices.items() if bs >= switch}, max_batch_size)
     kept = [(1, switch - 1, width)] if switch > 1 else []
     clipped = [(max(first, switch), last, w) for first, last, w in ranges if last >= switch]
-    merged: List[Tuple[int, int, int]] = []
-    for first, last, w in kept + clipped:
-        if merged and merged[-1][2] == w:
-            merged[-1] = (merged[-1][0], last, w)
-        else:
-            merged.append((first, last, w))
-    return merged
+    return merge_ranges(kept + clipped)

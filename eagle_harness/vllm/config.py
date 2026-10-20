@@ -42,7 +42,13 @@ import logging
 from dataclasses import dataclass
 from typing import Any, List, Literal, Mapping, Tuple
 
-from eagle_harness.core.chain_width import PROFILE_FILE, chain_widths, load_tree_rounds, served_tree_schedule
+from eagle_harness.core.chain_width import (
+    PROFILE_FILE,
+    chain_widths,
+    load_tree_rounds,
+    merge_ranges,
+    served_tree_schedule,
+)
 from eagle_harness.core.config import HarnessConfig, harness_config_from_dict
 from eagle_harness.core.limits import (
     MAX_CHAIN_VERIFY_NUM,
@@ -170,15 +176,10 @@ def _verify_widths(
 
 
 def _draft_token_schedule(widths: List[Tuple[int, int, int]], limit: int) -> List[Tuple[int, int, int]]:
-    ranges: List[Tuple[int, int, int]] = []
-    for _, last, width in widths:
-        count = max(0, width - 1)
-        if ranges and ranges[-1][2] == count:
-            ranges[-1] = (ranges[-1][0], last, count)
-        else:
-            ranges.append((ranges[-1][1] + 1 if ranges else 1, last, count))
-    ranges.append((limit + 1, 1 << 16, 0))
-    return ranges
+    # each range starts after the previous one: tree widths come per calibrated batch size, with gaps between them
+    firsts = [1] + [last + 1 for _, last, _ in widths[:-1]]
+    ranges = merge_ranges((first, last, max(0, width - 1)) for first, (_, last, width) in zip(firsts, widths))
+    return ranges + [(limit + 1, 1 << 16, 0)]
 
 
 def derived_chain_widths(
