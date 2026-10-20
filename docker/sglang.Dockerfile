@@ -15,7 +15,8 @@ ENV VIRTUAL_ENV=/opt/eagle
 ENV PATH="/opt/eagle/bin:${PATH}"
 RUN . /opt/eagle-release.env \
     && python3 -m pip install --no-cache-dir --extra-index-url "$EAGLE_CUDA_INDEX" \
-      --extra-index-url "$EAGLE_TORCH_CUDA_INDEX" "sglang==$EAGLE_SGLANG_VERSION" 'flashinfer-python>=0.7.2' \
+      --extra-index-url "$EAGLE_TORCH_CUDA_INDEX" --extra-index-url "$EAGLE_NVIDIA_INDEX" \
+      "sglang==$EAGLE_SGLANG_VERSION" 'flashinfer-python>=0.7.2' \
     && python3 -m pip install --no-cache-dir --no-deps --force-reinstall /src \
     && python3 -m pip check \
     && eagle-harness calibrate --help

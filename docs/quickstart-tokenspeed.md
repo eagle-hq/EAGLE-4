@@ -12,14 +12,19 @@ The release serving recipe uses Qwen3.8-27B BF16 and its EAGLE-4 draft on four B
 ## Before starting
 
 Complete the [TokenSpeed installation](install.md#tokenspeed-cuda-experimental), including its scheduler
-and kernel wheels, and run `eagle-harness-check`. Keep the CUDA 13.0 toolkit and `nvcc` available for
-first-use tree-round compilation. Set `MODEL` and `DRAFT` to readable local directories.
+and kernel wheels, and run `eagle-harness-check`. Tree-round sources need `nvcc` at first use.
+On the tested Ubuntu 26.04 / glibc 2.43 host, the CUDA 13.0 JIT fails. The passing serve-mode
+check uses a host-compatible CUDA 13.2 JIT with `CUDA_HOME=/usr/local/cuda-13.2`. Set that path
+to the installed compatible toolkit before launching. The engine wheels still come from `cu130`.
+Set `MODEL` and `DRAFT` to readable local directories.
 The measured cost-model recipe also requires matching calibrated target and draft tables under
 `COST_ROOT/cost/`. EAGLE-4 does not include a TokenSpeed calibration CLI or automatically select
 an installed TokenSpeed profile. Do not substitute vLLM or ROCm tables.
 
-If you do not have matching TokenSpeed costs, use the fixed-shape option below to check generation.
-It does not reproduce the cost-model benchmark or establish the same performance.
+Use `mode=serve` with matching costs for the checked path. Its twenty-prompt install check passed
+with 4 exact and 16 fp32-tolerance results. Static mode is not a qualified substitute when cost files
+are unavailable: its check has one fp32 gap of 0.178637, above the 0.125 tolerance.
+These are first-divergence checks, not bitwise output equality or sampled-distribution qualification.
 
 ## Start the server
 
@@ -33,23 +38,13 @@ test -d "$COST_ROOT/cost"
 CONFIG=$(python -c 'import json, os; print(json.dumps({"mode":"serve","data_path":os.environ["COST_ROOT"]}))')
 ```
 
-Alternatively, select a fixed tree without cost files:
-
-```bash
-CONFIG='{"mode":"static"}'
-STEPS=10
-```
-
-The static path supports at most ten draft steps because the engine stores its depth-first sort key
-in 64 bits. Do not reuse the twelve-step cost-model bound with `mode=static`.
-
-Use the release launch flags with the selected configuration:
+Use the release launch flags with the serve-mode configuration:
 
 ```bash
 : "${MODEL:?set the local Qwen3.8-27B BF16 target directory}"
 : "${DRAFT:?set the local compatible EAGLE-4 draft directory}"
-: "${CONFIG:?select cost-model or fixed-shape mode above}"
-: "${STEPS:?set the step bound with the selected mode above}"
+: "${CONFIG:?construct the serve-mode configuration above}"
+: "${STEPS:?set the serve-mode step bound above}"
 export HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=4
 python -m tokenspeed.cli serve "$MODEL" --tensor-parallel-size 4 \
   --attention-backend trtllm --max-model-len 65536 --max-num-seqs 4 \
@@ -63,8 +58,8 @@ python -m tokenspeed.cli serve "$MODEL" --tensor-parallel-size 4 \
 
 The running-request cap is four in the single-client release recipe. The concurrent release recipe
 uses `--max-num-seqs 32` with the same TP4 and context settings. Neither setting promises a speedup
-for your workload. The fixed-shape option changes the policy and draft-step bound, not the engine.
-In Docker, bind the server to `0.0.0.0` inside the container and keep the published host port on loopback.
+for your workload. A TokenSpeed release image has not been built or qualified.
+When a qualified image is available, bind the server to `0.0.0.0` inside the container and keep the published host port on loopback.
 If using cost files in Docker, mount their directory read-only and set `COST_ROOT` to that container path.
 
 ## Generate text

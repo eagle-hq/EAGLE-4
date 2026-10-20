@@ -8,8 +8,8 @@ last_verified: 2026-10-20
 
 ## Costs measured on the served rounds
 
-On SGLang the cost-model modes need no offline step: without `data_path`, the server prices the draft step and the
-target verify on its own served rounds. The first rounds at each batch bucket (a captured graph batch size) force
+On SGLang the cost-model modes need no offline step. Without `data_path`, a matching packaged MI355X profile
+is selected when available. Otherwise, the server prices the draft step and target verify on its own served rounds. The first rounds at each batch bucket (a captured graph batch size) force
 every captured verify width a few times, timed with CUDA events around the exact kernels served at the real
 context length; after that every round refines its cell (an exponential moving average per batch bucket, verify
 width and 1024-token context interval) and the cost model reads the resulting tables. The cells are cached under
@@ -38,16 +38,20 @@ on your allocated GPUs first.
 
 ## Run the command
 
-SGLang requires the host graph contract with per-variant forward modes. The calibration driver measures
-native decode as well as speculative chains. An older host without that contract fails with an explicit error.
+The released offline calibration path is vLLM. SGLang served-chain calibration requires the host graph
+contract with per-variant forward modes because it also measures native decode. The pinned SGLang CUDA
+release engine does not expose that contract, so the CLI's SGLang calibration path fails with an explicit
+error on that build. Use the [SGLang live-cost serving recipe](quickstart-sglang.md) without an offline step.
+The SGLang commands below document the driver interface for a host with the required contract, not a
+working calibration recipe on the pinned release engine.
 
 Set `MODEL`, `DRAFT` and `TP` to your target, compatible exported draft and tensor-parallel size:
 
 ```bash
-eagle-harness calibrate --model "$MODEL" --draft "$DRAFT" --tp "$TP"
+eagle-harness calibrate --engine vllm --model "$MODEL" --draft "$DRAFT" --tp "$TP"
 ```
 
-The command selects the sole installed engine. If both engines are installed, specify `--engine sglang` or
+Without `--engine`, the CLI selects the sole installed engine. If both engines are installed, specify `--engine sglang` or
 `--engine vllm`. TP defaults to one. No private dataset or calibration directory is required.
 
 | Engine | Default measurement | Default output |
@@ -55,8 +59,8 @@ The command selects the sole installed engine. If both engines are installed, sp
 | vLLM | Batch-one tree, verify widths 8, 16, 32 and 64, with context lengths below 4096 | `eagle-calibration-vllm/` |
 | SGLang | Served chains up to width 8, at concurrency 1 and 8, with 1024 new tokens per request | `eagle-calibration-sglang/` |
 
-SGLang requires a package build containing the served-chain calibration driver. It does not produce dynamic-tree
-cost tables. vLLM prices isolated whole steps and draft graph replays, not a full high-concurrency served round.
+The package includes the SGLang served-chain calibration driver. It requires the host graph contract above
+and does not produce dynamic-tree cost tables. vLLM prices isolated whole steps and draft graph replays, not a full high-concurrency served round.
 Neither command establishes a speedup or replaces a correctness check against no-spec generation.
 
 Preview the settings without importing an engine, loading a model or creating output:
@@ -193,7 +197,8 @@ The `a_d` come from `<data_path>/accept/chain.json`:
 
 These are vLLM's `spec_decode_num_drafts` and `spec_decode_num_accepted_tokens_per_pos` counters after serving the
 workload with the widest chain. Acceptance depends on the workload (short answers accept differently from long
-ones), not on the batch size, so measure it on the requests you serve. Widths past the measured positions are not
+ones). The policy reuses this profile across batch sizes, so measure representative requests and check that
+it remains appropriate at the concurrency you serve. Widths past the measured positions are not
 considered. Without the file, or without timings that price a chain at every calibrated batch size, chains verify
 `max_verify_width` tokens at every batch size.
 

@@ -37,7 +37,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[test]"
 ```
 
-Install sglang, vLLM or TokenSpeed with the eagle-harness hooks ([Compatibility](docs/compatibility.md)) to run that engine's
+Install SGLang, vLLM or experimental TokenSpeed with the eagle-harness hooks ([Compatibility](docs/compatibility.md)) to run that engine's
 tests. Each engine's tests skip without it.
 
 ## Test
@@ -52,11 +52,14 @@ A change to a kernel needs a test against a reference (torch or the kernel it re
 needs a measurement with its hardware, model, workload and baseline. `tools/greedy_parity.py` compares a speculative
 server token for token with a server without speculation. `tools/bench_kernels.py` times kernels.
 
-To build the release files:
+To build the release files on Linux, install the build tools and set the source and output paths.
+The example assumes CUDA 12.8 and 13.0 toolkits are installed at the paths shown:
 
 ```bash
-tools/build_wheel.sh <source tree> <out dir> /usr/local/cuda-12.9 /usr/local/cuda-13.0
-python tools/check_dist.py <out dir>
+python -m pip install build auditwheel patchelf
+export SOURCE_TREE="$PWD" OUT_DIR="$PWD/dist-release"
+tools/build_wheel.sh "$SOURCE_TREE" "$OUT_DIR" /usr/local/cuda-12.8 /usr/local/cuda-13.0
+python tools/check_dist.py "$OUT_DIR"
 ```
 
 ## Commit messages

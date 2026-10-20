@@ -23,8 +23,9 @@ python -m eagle_harness.kernels.arch
 On a GPU outside these tiers, or without an importable Triton, the server refuses `EAGLE_HARNESS` at startup with the
 reason, for example `... is older than NVIDIA sm_80 (A100)`.
 
-Runtime tests run on B300. The other architectures are compile-checked: nvcc builds the native library for each of
-them and Triton cross-compiles the kernels for each target.
+Runtime serving measurements cover B300 and SGLang on MI355X. Other listed architectures have compilation
+coverage, not serving qualification. Native CUDA builds apply only to NVIDIA targets. See the
+[support matrix](support-matrix.md) for the measured engine and model combinations.
 
 ## The kernels
 

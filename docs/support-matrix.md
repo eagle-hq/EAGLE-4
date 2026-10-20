@@ -35,8 +35,8 @@ Every timed pass follows a warm pass. EAGLE-4 measures live costs. Each EAGLE-4 
 | 8 | 1 | 1 | Irrelevant at batch 1 | 241.7 | 828.6 | 3.43× |
 
 TP4 concurrency 8 measures 2749.5 and 2891.8 tokens/s across its two starts.
-TP8 concurrency 1 has a throughput result but its configuration-specific correctness check is incomplete.
-Correctness from another TP8 run is not substituted.
+TP8 concurrency 1 and 8 each give 5 exact / 14 near tie / 1 fp32-tolerance pass, with zero failures
+in the configuration-specific twenty-prompt checks. This does not resolve TP8 concurrency-8 throughput variability.
 
 Concurrency 64 queues into 32 running slots. The measured padding-disabled settings identify those results,
 not a recommendation to disable padding. Concurrent serving commands keep SGLang's default padding enabled.
@@ -96,23 +96,63 @@ The two TP8 concurrency-8 starts differ by 11%, and both are included in the mea
 
 ### Measured high-load tree schedule
 
-A one-start TP4 qualification of the served-round schedule reaches 2906.7 tokens/s at concurrency 8,
-compared with the fixed-width tree's two-start mean of 2883.9 above. At concurrency 64 it reaches
-7036.3 tokens/s, 1.025× its matched no-speculation control. These one-start results are not pooled with
-the fixed-width results. The twenty-prompt check gives 5 exact / 14 near tie / 1 previously arbitrated
-fp32-tolerance pass; the last case has the same common prefix as the earlier passing arbitration.
-This is not bitwise equality to no-speculation decoding.
+A short-workload check uses two independent starts of EAGLE-4,
+128 requests with a 256-token cap, a running cap of 64 and a warm pass before measurement. The shipped rounds
+schedule reaches 8288.6 tokens/s.
+The shipped starts reach 8318.5 and 8258.7 tokens/s. Their mean is 0.970× an earlier matched-workload no-spec
+control at 8541.1 tokens/s on the same machine. That control was not repeated inside this check, so the
+ratio does not establish a new two-start no-spec qualification. An earlier one-start smoke reached only
+6872.4 tokens/s. None of these short-workload results is pooled with the longer fixed-width results above.
+
+The final-source twenty-prompt check gives 5 exact / 14 near tie / 1 fp32-tolerance pass and no failures.
+It checks first divergences against no-speculation decoding, not bitwise equality or the concurrent
+high-batch width-4 path. Missing registration-time INFO logs do not imply the schedule failed to load:
+runtime counters show the reduced verification width.
 
 Use the [packaged rounds file with matching calibrated costs](../eagle_harness/core/profiles/vllm-qwen38-tp4/README.md).
 The schedule narrows the verify width from 16 to 4 at batch size 20 and above, without enabling native-OFF.
 No rounds file means no width change.
+
+## Short-workload C8 checks
+
+These B300 TP4 checks use two independent starts, 16 requests with a 256-token cap and a matching
+warm pass. They report absolute rates for the final runtime source on its pinned release engine.
+They do not replace the longer-workload tables or establish a speedup over no-spec decoding.
+
+| Engine | Tokens/s | Running cap | Policy |
+|---|---:|---:|---|
+| SGLang | 2586.7 | 32 | Live costs, graph padding enabled |
+| vLLM | 2708.8 | 64 | Width 16 at this batch size |
+
+Each measured pass lasts roughly 1.5 seconds with substantial start-to-start spread. No matching
+no-spec mean is reported for these short checks.
 
 ## TokenSpeed (experimental)
 
 The adapter implements static and calibrated trees, chains and sampled trees. This is implementation coverage,
 not a performance or distribution-quality claim for every configuration.
 Prompt logprobs, live cost measurement and native no-speculation rounds are not supported.
-No TokenSpeed throughput number is claimed for an unmeasured or non-matching workload.
+No TokenSpeed throughput number is claimed for an unmeasured or non-matching workload. The CUDA install
+checks completed real static and cost-model requests, but a static-mode first divergence remains above the
+fp32 gate. Successful installation or generation is not blanket correctness qualification. TP1/TP8, sampled
+distributions, long contexts and release-stack Nemotron need separate qualification.
+
+## Artifact installation checks
+
+These checks use private CUDA artifacts on B300 TP4, twenty prompts with up to 256 generated tokens,
+and one server start. The rate is total generated tokens divided by summed request latency, not a
+multi-start concurrent throughput benchmark. Publication and final-artifact rebuilding are separate gates.
+
+| Artifact and mode | Correctness result | Tokens/s | Qualification limit |
+|---|---|---:|---|
+| TokenSpeed wheel, serve | 4 exact / 16 fp32-tolerance passes | 786.33 | Host-compatible CUDA 13.2 JIT; CUDA 13.0 JIT fails on Ubuntu 26.04 / glibc 2.43 |
+| TokenSpeed wheel, static | 5 exact / 14 fp32 passes / 1 failure | 706.36 | Not qualified: failing gap 0.178637 exceeds 0.125 |
+| SGLang corrected private image | 4 exact / 16 near ties | 628.19 | Hook, dependency and request checks pass; prebuilt `eagle-harness` wheel replaces the Dockerfile source install |
+| vLLM private image | Pending | — | Image loaded; serving and correctness qualification pending |
+| TokenSpeed image | Not built | — | No approved base image qualification |
+
+A near-tie or fp32-tolerance pass is not an exact-token match. TokenSpeed lacks full-decode native
+top-logprobs, so each divergent prefix in these install checks goes directly to fp32 arbitration.
 
 ## Correctness and request features
 

@@ -43,10 +43,10 @@ vLLM runs the method on its Model Runner V2. The plugin uses its speculative-met
 `prepare_verify_inputs`, `make_rejection_sampler` and `post_accept`, the linear-attention verify extension for GDN
 layers, and the `CUSTOM` attention backend slot.
 
-TokenSpeed runs the method as a drafter on its plugin registries. The plugin uses `register_drafter` and
-`register_model` from TokenSpeed main and generic hooks of the eagle-hq TokenSpeed build: the method's JSON
+Experimental TokenSpeed runs the method as a drafter on its plugin registries. The plugin uses `register_drafter` and
+`register_model` and generic hooks of the pinned TokenSpeed release build: the method's JSON
 config (`--speculative-algorithm-config`, delivered to `BaseDrafter.configure_algorithm`), the target's aux hidden
-states for a plugin algorithm, and tree drafting by a plugin drafter. The same branch lets a plugin draft bind its
+states for a plugin algorithm, and tree drafting by a plugin drafter. That build lets a plugin draft bind its
 cache under a hybrid target and adds sliding-window attention to tree lanes. See [TokenSpeed](#tokenspeed) below.
 
 ## One decode round
@@ -73,9 +73,11 @@ prepare the next round.
    request it is the target's argmax. For a sampled request it is a draw from the target's distribution at that
    node (temperature, top-k, top-p, min-p): on vLLM the draw vLLM's sampler makes at that position, with noise
    keyed by the request's seed and the node's depth; on sglang, sglang's tree speculative sampling. The accepted
-   path plus one bonus token from the target are committed. Every committed token is the target's own token given
-   the accepted prefix, so the output has the target's distribution. Greedy output matches greedy decoding without
-   speculation, up to near-ties in the target's logits that a different batch shape can flip. The accepted rows'
+   path plus one bonus token from the target are committed. Verification uses target scores at the accepted prefix.
+   This describes the algorithm, not proof of distribution equivalence or exact no-spec output on every
+   implementation and model. Different verification shapes can change target arithmetic, including cases outside
+   the near-tie gate. Check the [measured correctness coverage](support-matrix.md#correctness-and-request-features).
+   The accepted rows'
    KV and GDN states are moved to the request's chain positions.
 6. The draft extend runs the draft over the accepted tokens, which updates its KV cache and yields the next round's
    first candidates.
@@ -103,8 +105,8 @@ eagle-harness supplies the tree policy and the draft model:
   (`tests/test_tokenspeed_adapter.py`). `eagle_harness/tokenspeed/tree_lanes.py` turns the frontier choices into
   TokenSpeed's 64-bit lane masks (each lane sees its ancestors' draft slots) and the verify window and parents.
 
-The EAGLE-4 draft layer has a sliding window. TokenSpeed main refuses a sliding-window layer in its tree lanes; the
-hooks branch adds that path (every lane of a request sits at one position, so all lanes see the same committed keys).
+The EAGLE-4 draft layer has a sliding window. The pinned TokenSpeed release build supports sliding-window
+attention in tree lanes (every lane of a request sits at one position, so all lanes see the same committed keys).
 
 Serve mode captures the target, sampling and draft extend together. The host launches the first draft-depth graph.
 The GPU cost policy decides whether to continue and tail-launches later depths and finalization. Calibration parsing,

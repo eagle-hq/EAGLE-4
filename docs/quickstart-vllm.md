@@ -69,7 +69,9 @@ python -m vllm.entrypoints.cli.main serve "$MODEL" --tensor-parallel-size 4 \
 
 Model Runner V2 and `CUSTOM` attention are required for this tree. The static shape supplies the bounds,
 the calibrated costs supply depth stopping, and the rounds file selects width by batch size.
-Without `rounds/tree.json`, the configured width stays fixed. Do not point `data_path` at the packaged
+Registration-time INFO messages can be dropped before vLLM configures logging, so an absent schedule-load
+line does not prove the schedule is missing. Without `rounds/tree.json`, the configured width stays fixed.
+Do not point `data_path` at the packaged
 rounds-only directory because it lacks the depth-stop cost tables.
 
 ## Generate text

@@ -15,7 +15,7 @@ For legacy environment variables and CLI flags, see [Migration](migration.md).
 | key | type | default | meaning |
 |---|---|---|---|
 | `mode` | string | `"serve"` | `serve`: the cost model sizes every round. `eval`: cost sizing with evaluation settings (see the inactive-policy note below). `calibrate`: reserved for cost measurement (see [Calibration](calibration.md)). `static`: the fixed tree of the shape flags every round, no cost model (on SGLang the same EAGLE-4 round, graphs and kernels as the cost-model modes). |
-| `data_path` | string | none | Offline calibration directory whose `cost/` subdirectory holds the cost tables and whose `key.json` names the setup they were measured on (GPU, TP size, model pair, engine, dtype); a directory keyed for another setup is refused. Without it, the cost-model modes measure the costs on the served rounds ([Calibration](calibration.md#costs-measured-on-the-served-rounds)). |
+| `data_path` | string | none | Offline calibration directory whose `cost/` subdirectory holds the cost tables and whose `key.json` names the setup they were measured on (GPU, TP size, model pair, engine, dtype); a directory keyed for another setup is refused. On SGLang, omitting it uses a matching packaged profile when available, otherwise live served-round costs ([Calibration](calibration.md#costs-measured-on-the-served-rounds)). vLLM and TokenSpeed require the engine-specific inputs below. |
 | `cost_cache` | string | `~/.cache/eagle-harness/costs` | Directory of the live-cost cache files (one per setup key). |
 | `intensity` | string | `"high_intensity"` | Draft shape family of the cost tables: `high_intensity`, `low_intensity` (trees) or `chain_intensity` (one candidate per step). It sets the batch limit and the verify widths that get a CUDA graph. |
 | `draft_family` | string | `"eagle4"` | `eagle4`. Sets the cost model's depth loss when `cost_model.depth_loss_ratio` is not given. |
@@ -115,7 +115,8 @@ Tree modes keep one physical verify width per server. Serve-mode trees pad unuse
 Pass `--sampling-backend greedy` because the default FlashInfer sampler cannot verify draft trees.
 
 For calibrated tree serving, provide `data_path` containing the calibration `cost/` directory.
-The README example uses a running cap of 32, not a general performance recommendation.
+The [TokenSpeed quickstart](quickstart-tokenspeed.md) distinguishes the single-client cap of 4 from the
+concurrent cap of 32. Neither is a general performance recommendation.
 The calibration must match the target, draft, hardware, tensor-parallel setup and recurrent-state dtype.
 `eval`, `calibrate` and live costs are not supported by this adapter. Chains use top-k 1 and `chain_intensity`.
 An explicit `chain_width_table` contains increasing `[minimum_batch_size, verify_width]` pairs in `serve` mode.
@@ -129,7 +130,8 @@ not a measured high-concurrency speed claim. Sampled-tree distribution quality i
 | `--speculative-num-draft-tokens` | Physical verify width, root included, large enough for the selected top-k |
 
 The lane window `(steps - 1) * topk` must fit in 64 slots. Its KV reservation is independent of the verify width,
-so depth 12, top-k 4 and verify width 16 are supported in serve mode.
+so depth 12, top-k 4 and verify width 16 are supported in serve mode. Static mode also encodes a
+depth-first sort key and supports at most ten steps. This is distinct from the lane-window limit.
 
 ## Shape limits
 

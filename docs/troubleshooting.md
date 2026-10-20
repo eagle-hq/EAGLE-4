@@ -46,7 +46,7 @@ no supported host installed (one of: sglang, vllm, tokenspeed)
 | `Unknown speculative algorithm name: EAGLE_HARNESS` (sglang), vLLM rejects the method `eagle_harness`, or TokenSpeed does not know the algorithm `EAGLE_HARNESS` | the plugin did not register | run `eagle-harness-check` and read the error the engine logged at startup |
 | `EAGLE_HARNESS needs --speculative-algorithm-config (JSON or a path to JSON), ...` | sglang got no config | pass `{}` (live costs), `{"data_path": "<calibration dir>"}` or `{"mode": "static"}` |
 | `Cost tables under ... were measured on another setup (stored vs this server): {...}` | `data_path` tables keyed for another GPU, TP size, model pair, engine build or dtype | calibrate for this setup, or drop `data_path` to measure the costs on the served rounds |
-| `EAGLE-Harness mode 'serve' needs data_path (the calibration directory).` | a cost-model mode without cost tables (TokenSpeed) | set `data_path` ([Calibration](calibration.md)) or use `"mode": "static"` |
+| `EAGLE-Harness mode 'serve' needs data_path (the calibration directory).` | a cost-model mode without cost tables (TokenSpeed) | set `data_path` to matching TokenSpeed costs ([Calibration](calibration.md)); static mode is not a correctness-qualified substitute |
 | `config: unknown keys ['intensty']; valid keys are [...]` | a misspelt key | use a key from the list ([Configuration](configuration.md)) |
 | `mode: 'fast' is not one of static, serve, eval, calibrate.` | a bad value | use one of the listed values |
 | `EAGLE_HARNESS needs --speculative-num-steps, --speculative-eagle-topk and --speculative-num-draft-tokens ...` | sglang got no tree shape | pass all three |
@@ -56,7 +56,7 @@ no supported host installed (one of: sglang, vllm, tokenspeed)
 | `Unexpected FlashInfer page size 128 without trtllm-gen GQA` (vLLM) | the draft runs on FlashInfer, which serves a multi-head draft only on pages up to 64 tokens; a hybrid target needs 128 or more | set `"attention_backend": "FLASH_ATTN"` in `--speculative-config` (the draft's backend only) |
 | `num_speculative_tokens=... disagrees with method_config.max_verify_width=...` (vLLM) | both were set and do not differ by one | set only `max_verify_width` |
 | `the draft tree has fewer nodes than the verify width needs; raise tree_depth or node_top_k` (vLLM) | the tree cannot fill the verify width | raise `tree_depth` or `node_top_k`, or lower `max_verify_width` |
-| `EAGLE_HARNESS on TokenSpeed supports static and serve modes` (TokenSpeed) | an unsupported evaluation or calibration mode | use `static`, or `serve` with matching cost tables |
+| `EAGLE_HARNESS on TokenSpeed supports static and serve modes` (TokenSpeed) | an unsupported evaluation or calibration mode | use `serve` with matching cost tables for the checked path; static remains unqualified |
 | `tree drafting topk=... exceeds verify width ...` (TokenSpeed) | a draft step needs more write locations than the verify-sized buffer holds | raise `--speculative-num-draft-tokens` or lower top-k |
 | `FlashInferSamplingBackend cannot verify draft trees; use --sampling-backend greedy or triton` (TokenSpeed) | TokenSpeed's default sampling backend | pass `--sampling-backend greedy` |
 | `--speculative-num-draft-tokens N verifies more nodes than a tree of depth ... holds` (TokenSpeed) | the tree cannot fill the verify width | raise `--speculative-num-steps` or `--speculative-eagle-topk`, or lower the width |
@@ -70,9 +70,12 @@ inputs.`). Serve them from a server without the method.
 ## Slower than expected
 
 - Check that the cost tables match your GPU, TP size, tree shape and engine build ([Calibration](calibration.md)).
-  Tables from another setup load without an error and make worse choices.
+  A mismatched `key.json` is refused. Unkeyed legacy tables can load with a warning, and the key does not
+  encode every setting, including the attention backend.
 - Look for the startup warning `native CUDA kernels unavailable`. The Triton fallback gives the same results more
   slowly.
-- On vLLM, look for the startup line about the depth stop: `no cost tables price a draft step ...` means the stop
-  drafts every step that could still change the verify set.
+- On vLLM, `no cost tables price a draft step ...` means the lossless stop drafts every step that could
+  still change the verify set. Registration-time INFO messages can be suppressed before logging is configured.
+  An absent schedule-load message alone does not show that `rounds/tree.json` was ignored. Verify the
+  configured `data_path` and runtime draft-width counters rather than relying only on that message.
 - Run `python -m eagle_harness.kernels.arch` to see which kernel tier each GPU gets.

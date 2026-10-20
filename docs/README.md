@@ -6,7 +6,8 @@ last_verified: 2026-10-19
 
 # eagle-harness documentation
 
-Install a pinned engine and check generation with live costs on SGLang or a fixed tree on vLLM.
+Install a pinned engine and check generation with live costs on SGLang or calibrated costs and the shipped
+batch-dependent tree schedule on vLLM.
 TokenSpeed is experimental. Measure the setup you will deploy.
 Start with the measured model pairs rather than treating config admission as proof of support.
 

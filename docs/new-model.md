@@ -20,8 +20,8 @@ First serve the target without speculation in your pinned engine. Confirm that i
 precision and attention backend work. Keep those settings for the speculative comparison.
 
 For the measured EAGLE4 ports, train a dense single-layer draft with rotary positions, full target vocabulary,
-three auxiliary hidden-state inputs and a low-rank candidate head. The draft query and KV head counts must match
-for the measured tree adapter. The target itself can use a hybrid architecture if the engine and EAGLE-4 support
+three auxiliary hidden-state inputs and a low-rank candidate head. Grouped-query draft attention is implemented, but the query and KV head counts must be compatible
+with the selected adapter and tensor-parallel layout. The target itself can use a hybrid architecture if the engine and EAGLE-4 support
 its verify and state-commit paths.
 
 Use the target's hidden size, vocabulary and token IDs when building your draft configuration. Keep its trained
@@ -161,9 +161,10 @@ with safe_open(root / "model.safetensors", framework="pt", device="cpu") as weig
 PY
 ```
 
-The inspected Nemotron draft used this format, including a rank-128 candidate head, but also used MoE,
-attention normalization and no RoPE. Those structural fields are rejected by the measured release adapters.
-Do not remove them or claim Nemotron support from the format check.
+The inspected Nemotron draft used this format, including a rank-128 candidate head, latent MoE,
+attention normalization and no RoPE. SGLang and vLLM implement those structures. Preserve them in the
+export rather than removing fields to pass validation. Structural admission does not establish Nemotron
+release-stack performance or correctness qualification. See [known limits](known-limits.md#models-and-hardware).
 
 ## Check generation before calibration
 
@@ -187,11 +188,13 @@ feature out of the deployment contract.
 Stop the test servers and measure the admitted pair:
 
 ```bash
-eagle-harness calibrate --model "$MODEL" --draft "$EXPORT" --tp "$TP" --output calibration-new-model &&
+eagle-harness calibrate --engine vllm --model "$MODEL" --draft "$EXPORT" --tp "$TP" --output calibration-new-model &&
   sh calibration-new-model/serve.sh
 ```
 
-Specify `--engine` if both engines are installed. Supply a representative `--data` file for SGLang.
+This offline command is for vLLM. The pinned SGLang engine lacks the native-decode graph contract needed
+by the served-chain calibration CLI. Use its live-cost serving path instead. On a host exposing the required
+contract, SGLang chain calibration should use a representative `--data` file.
 The [calibration guide](calibration.md) explains the different per-engine measurements. Benchmark against a
 matched no-spec server at your deployment concurrency. Save the model and draft revisions, engine build,
 GPU type, TP, precision and calibration settings alongside the result before calling the new pair supported.

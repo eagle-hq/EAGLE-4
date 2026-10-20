@@ -22,7 +22,8 @@ so only the draft depth adapts per round.
 
 ## Do I need cost tables?
 
-SGLang measures costs on the served rounds when no `data_path` is supplied. Offline tables remain an option.
+When no `data_path` is supplied, SGLang selects a matching packaged MI355X profile if available, otherwise
+it measures costs on served rounds. Offline tables remain an option.
 vLLM static trees need no tables, while automatic policies require matching measured costs. Experimental
 TokenSpeed needs offline costs for calibrated decisions, or a complete explicit chain schedule.
 See [calibration](calibration.md).
@@ -58,10 +59,12 @@ SGLang and vLLM support sampled requests with the engine-specific restrictions b
 `tools/sampling_check.py` compares a speculative server with a no-spec server. Sampling smoke tests alone
 do not establish distribution equivalence for every model and workload.
 
-- vLLM: a seeded request decodes the same text as without speculation, up to the logits' numerics. vLLM itself
+- vLLM: seeded sampling uses the target sampler, but an identical seed is not a blanket guarantee of the same
+  no-spec text or distribution qualification. vLLM itself
   refuses min-p and logit bias with any speculative method. A batch with
   repetition, frequency or presence penalties, bad words, a thinking budget or a custom logits processor is
-  verified as chains. That is exact but accepts fewer tokens.
+  verified as chains using the host rejection sampler, which can accept fewer tokens. This fallback is not a
+  claim of token-identical output across different numerical execution shapes.
 - sglang: sampled requests go through sglang's own tree speculative sampling. min-p, and top-k together with top-p,
   need an sglang build with the verify filter fix: older builds ignore min-p in verify and cut top-p after top-k.
   Penalties use sglang's relaxed form (counts of committed tokens only), as in sglang's own EAGLE, so they are not

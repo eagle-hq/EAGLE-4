@@ -3,7 +3,7 @@ message: "If you use eagle-harness in your work, cite the EAGLE-4 paper below."
 type: software
 title: "eagle-harness"
 abstract: >-
-  EAGLE-Harness for sglang and vLLM: cost-model-driven dynamic-tree speculative decoding with EAGLE-4 drafts, as an
+  EAGLE-4 for SGLang, vLLM and experimental TokenSpeed: cost-model-driven dynamic-tree speculative decoding with EAGLE-4 drafts, as an
   out-of-tree engine plugin.
 authors:
   - name: "Eagle AI Team"
@@ -19,7 +19,7 @@ preferred-citation:
   type: generic
   title: "EAGLE-4: One Flexible Drafter for All Batch Sizes and Hardware"
   authors:
-    - name: "Eagle AI Team"
+    - name: "EAGLE-4 Team"
   year: 2026
   notes: "Preprint"
   url: "https://github.com/eagle-hq/EAGLE-4/blob/main/EAGLE4_Paper.pdf"
