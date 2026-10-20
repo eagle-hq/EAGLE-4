@@ -4,6 +4,7 @@
 """Exercise the real publisher CLI against an isolated, file-backed gh fake."""
 
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -52,10 +53,13 @@ if args[1] == "view":
     print(json.dumps({"tagName": "v0.1.0", "isDraft": os.environ.get("GH_TEST_DRAFT") == "true",
                       "assets": [{"name": p.name} for p in remote.iterdir()]}))
 elif args[1] == "upload":
-    assert len(args) == 4, args
     source = Path(args[3])
     target = remote / source.name
-    assert not target.exists(), "no clobber"
+    if args[4:] == ["--clobber"]:
+        assert source.name.endswith("-SHA256SUMS"), "only a manifest is ever replaced"
+    else:
+        assert len(args) == 4, args
+        assert not target.exists(), "no clobber"
     shutil.copyfile(source, target)
 elif args[1] == "download":
     name = args[args.index("--pattern") + 1]
@@ -369,3 +373,125 @@ def test_draft_requires_explicit_opt_in_and_cannot_make_pages(tmp_path, release,
     result = command("pages", TAG, tmp_path / "site")
     assert result.returncode != 0
     assert not (tmp_path / "site").exists()
+
+
+ALLOWED_THIRD_PARTY = (
+    ("torch", "2.9.1+rocm7.2.0.lw.git7e1940d4", "torch-2.9.1+rocm7.2.0.lw.git7e1940d4-1eagle-cp310-cp310-linux_x86_64.whl"),
+    ("sglang-kernel", "0.4.7", "sglang_kernel-0.4.7-1eagle-cp310-cp310-linux_x86_64.whl"),
+)
+
+
+@pytest.fixture
+def third_party(tmp_path, monkeypatch):
+    """Allow-listed third-party wheels plus an audited source tree whose lock pins their hashes."""
+    source = tmp_path / "audited-source"
+    (source / "tools").mkdir(parents=True)
+    (source / "docker/rocm").mkdir(parents=True)
+    for name in ("engine_release.py", "mk_index.py"):
+        shutil.copyfile(REPO / "tools" / name, source / "tools" / name)
+    monkeypatch.setattr(sys.modules[__name__], "TOOL", source / "tools/engine_release.py")
+    extra = []
+    for project, version, filename in ALLOWED_THIRD_PARTY:
+        path = tmp_path / filename
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("x.dist-info/METADATA", f"Name: {project}\nVersion: {version}\n")
+        extra.append(path)
+    lock = source / "docker/rocm/requirements.lock"
+    lock.write_text("".join(
+        f"{project}=={version} --hash=sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}\n"
+        for (project, version, _), path in zip(ALLOWED_THIRD_PARTY, extra)
+    ))
+    return extra, lock
+
+
+def test_extend_adds_allow_listed_third_party_wheels_and_indexes_them(tmp_path, release, third_party):
+    remote, log = release
+    extra, _ = third_party
+    engine = wheels(tmp_path, "rocm")
+    assert command("upload", TAG, "rocm", *engine).returncode == 0
+    released = (remote / "engine-rocm-SHA256SUMS").read_text()
+    # Without --extend a released manifest never changes.
+    result = command("upload", TAG, "rocm", *engine, *extra)
+    assert result.returncode != 0 and "SHA256 mismatch" in result.stderr
+    assert (remote / "engine-rocm-SHA256SUMS").read_text() == released
+    result = command("upload", "--extend", TAG, "rocm", *engine, *extra)
+    assert result.returncode == 0, result.stderr
+    manifest = (remote / "engine-rocm-SHA256SUMS").read_text()
+    assert released in manifest and len(manifest.splitlines()) == 3
+    uploads = [args for args in calls(log) if args[1] == "upload"]
+    assert "--clobber" in uploads[-1] and uploads[-1][3].endswith("engine-rocm-SHA256SUMS")
+    assert not any("--clobber" in args for args in uploads[:-1])
+    assert {Path(args[3]).name for args in uploads[-3:-1]} == {p.name for p in extra}
+    # A rerun verifies bytes and uploads nothing.
+    assert command("upload", "--extend", TAG, "rocm", *engine, *extra).returncode == 0
+    assert [args for args in calls(log) if args[1] == "upload"] == uploads
+    site = tmp_path / "site"
+    result = command("pages", TAG, site)
+    assert result.returncode == 0, result.stderr
+    for project, _, filename in ALLOWED_THIRD_PARTY:
+        page = (site / "whl/rocm" / project / "index.html").read_text()
+        digest = hashlib.sha256((remote / filename).read_bytes()).hexdigest()
+        assert f"releases/download/{TAG}/{filename.replace('+', '%2B')}#sha256={digest}" in page
+    assert not list(site.rglob("*.whl"))
+
+
+@pytest.mark.parametrize("case", ["drop-released", "change-released"])
+def test_extend_never_drops_or_changes_released_entries(tmp_path, release, third_party, case):
+    remote, log = release
+    extra, _ = third_party
+    engine = wheels(tmp_path, "rocm")
+    assert command("upload", TAG, "rocm", *engine, extra[0]).returncode == 0
+    released = (remote / "engine-rocm-SHA256SUMS").read_bytes()
+    uploads = [args for args in calls(log) if args[1] == "upload"]
+    if case == "drop-released":
+        result = command("upload", "--extend", TAG, "rocm", *engine, extra[1])
+        assert "--extend must keep every entry" in result.stderr
+    else:
+        with zipfile.ZipFile(engine[0], "a") as archive:
+            archive.writestr("extra.txt", "rebuilt")
+        result = command("upload", "--extend", TAG, "rocm", *engine, *extra)
+        assert "SHA256 mismatch" in result.stderr
+    assert result.returncode != 0
+    assert (remote / "engine-rocm-SHA256SUMS").read_bytes() == released
+    assert [args for args in calls(log) if args[1] == "upload"] == uploads
+
+
+@pytest.mark.parametrize("case", ["unlisted-upstream", "hash-not-locked", "other-channel"])
+def test_third_party_wheels_must_be_allow_listed_and_locked(tmp_path, release, third_party, case):
+    _, log = release
+    extra, lock = third_party
+    channel, artifacts = "rocm", [*wheels(tmp_path, "rocm"), *extra]
+    if case == "unlisted-upstream":
+        # torchvision is available from AMD's index, so it is never served here.
+        path = tmp_path / "torchvision-0.24.0+rocm7.2.0.gitb919bd0c-cp310-cp310-linux_x86_64.whl"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("x.dist-info/METADATA", "Name: torchvision\nVersion: 0.24.0+rocm7.2.0.gitb919bd0c\n")
+        lock.write_text(lock.read_text() + f"torchvision==0.24.0+rocm7.2.0.gitb919bd0c --hash=sha256:"
+                        f"{hashlib.sha256(path.read_bytes()).hexdigest()}\n")
+        artifacts.append(path)
+        expected = "not an Eagle engine wheel"
+    elif case == "hash-not-locked":
+        lock.write_text(lock.read_text().replace(hashlib.sha256(extra[0].read_bytes()).hexdigest(), "0" * 64))
+        expected = "does not match the ROCm lock"
+    else:
+        channel, artifacts = "cu130", [*wheels(tmp_path, "cu130"), *extra]
+        expected = "not an Eagle engine wheel"
+    result = command("upload", TAG, channel, *artifacts)
+    assert result.returncode != 0
+    assert expected in result.stderr
+    assert not log.exists()
+
+
+def test_allow_list_is_pinned_by_the_shipped_rocm_lock():
+    spec = importlib.util.spec_from_file_location("engine_release", TOOL)
+    sys.path.insert(0, str(TOOL.parent))
+    try:
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(TOOL.parent))
+    lock = module.read_lock(module.ROCM_LOCK)
+    assert set(module.THIRD_PARTY) == {"rocm"}
+    for filename in module.THIRD_PARTY["rocm"]:
+        name, version = filename.split("-")[:2]
+        assert lock[module.mk_index.normalize(name)][0] == version, filename

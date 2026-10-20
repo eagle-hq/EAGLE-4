@@ -85,3 +85,20 @@ Source-Available License is not such a license: it is not an open-source license
 4c) excludes "separable proprietary components that are not derived from or modifications of the Software". No source
 distribution carries the runtime in any case, because `MANIFEST.in` prunes `eagle_harness/kernels/_native` from the
 sdist and a source install compiles `candidate.cu` against the CUDA toolkit already on the machine.
+
+## Redistributed ROCm wheels
+
+This section is separate from the eagle-harness notices above. The EAGLE-4 ROCm wheel index also serves three
+third-party wheels that no vendor index carries in the tested form. They are separate downloads, not part of
+eagle-harness, and each keeps the license files of its own source. Every other ROCm dependency is installed from
+PyPI or AMD's indexes, not from the EAGLE-4 index.
+
+| Wheel | Project and license | Change |
+|---|---|---|
+| `torch-2.9.1+rocm7.2.0.lw.git7e1940d4-1eagle-cp310-cp310-linux_x86_64.whl` | PyTorch, as built by AMD for ROCm 7.2. BSD-3-Clause. Its `LICENSE` and `NOTICE` ship unchanged in the wheel. | Modified metadata only: the requirement `triton==3.5.1+rocm7.2.0.gita272dfa8` is replaced by `triton==3.7.0+amd.rocm7.2.0.git89002410`, `WHEEL` gains build tag `1eagle`, and `RECORD` is regenerated (`tools/repack_rocm_torch.py`). Every other file is AMD's original. |
+| `sglang_kernel-0.4.7-1eagle-cp310-cp310-linux_x86_64.whl` | SGLang kernel package (`python/sglang/kernels/aot`). Apache-2.0. Copyright 2023-2024 SGLang Team. | Built from unmodified SGLang source for HIP `gfx950`. SGLang's `THIRDPARTYNOTICES.txt` from the same source is added to the wheel's license files (`tools/add_wheel_notices.py`). |
+| `amd_aiter-0.1.21.dev48+g4ad998328.d20260918-cp310-cp310-linux_x86_64.whl` | AITER. MIT. Copyright Advanced Micro Devices, Inc. It bundles composable_kernel (MIT, Advanced Micro Devices, Inc.), whose `LICENSE` ships in the wheel. | Built from ROCm/aiter revision `4ad99832` with the patches the SGLang v0.5.20 ROCm image applies: ROCm/aiter commits `7b481fb` and `24a62b1` (tuned GEMM configurations), a `functools.cache` edit and a `torch.Stream` compatibility edit. |
+
+The Torch wheel also contains two libraries that its `LICENSE` file does not name. Both are AMD's builds,
+redistributed unchanged: `libaotriton_v2.so` (AOTriton, MIT, Advanced Micro Devices, Inc.,
+<https://github.com/ROCm/aotriton>) and `libmagma.so` (MAGMA, BSD-3-Clause, <https://icl.utk.edu/magma/>).

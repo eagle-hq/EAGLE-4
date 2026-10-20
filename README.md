@@ -102,11 +102,12 @@ speculative server is faster.
 Install one patched engine per environment, then `eagle-harness==0.1.0` from PyPI. The
 [v0.1.0 GitHub release](https://github.com/eagle-hq/EAGLE-4/releases/tag/v0.1.0) carries the engine wheels, not `eagle-harness`.
 Use Python 3.12 for the CUDA engines and Python 3.10 for the ROCm wheel. The commands read their pins from the
-release settings file in this checkout:
+release settings file in the checkout. Run them, and start servers, from the directory that contains the checkout.
+Inside it, `python -m` would import the source tree's `eagle_harness/` instead of the installed wheel.
 
 ```bash
-git clone https://github.com/eagle-hq/EAGLE-4 && cd EAGLE-4
-. ./docs/release.env
+git clone https://github.com/eagle-hq/EAGLE-4
+. EAGLE-4/docs/release.env
 ```
 
 SGLang on CUDA:
@@ -134,9 +135,8 @@ prove that kernels run or that generation is correct, so send the quickstart req
 
 The [installation guide](docs/install.md) has the same steps for [vLLM](docs/install.md#vllm-cuda) and
 [TokenSpeed](docs/install.md#tokenspeed-cuda-experimental), which needs its scheduler and kernel wheels from the
-same index. The SGLang ROCm fresh-install path is
-[still under qualification](docs/install.md#sglang-rocm-on-amd), so the [AMD recipe](docs/quickstart-amd.md)
-applies to an already-qualified MI355X environment only.
+same index. SGLang on AMD MI355X installs a hash-locked closure from PyPI, the ROCm index and AMD's indexes:
+follow [SGLang ROCm](docs/install.md#sglang-rocm-on-amd), then the [AMD recipe](docs/quickstart-amd.md).
 
 ## Serve
 

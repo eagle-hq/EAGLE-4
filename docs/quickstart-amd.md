@@ -13,8 +13,11 @@ No `data_path` or profile environment variable is needed.
 ## Before starting
 
 Complete the [ROCm installation](install.md#sglang-rocm-on-amd) in a fresh Python 3.10 environment,
-then run `python -m pip check` and `eagle-harness-check`. Use the entire locked wheel bundle, including
+then run `python -m pip check` and `eagle-harness-check`. Install the entire hash-locked closure, including
 its corrected Torch wheel. An individually installed SGLang wheel is not a complete ROCm runtime.
+Run the commands below from the directory that contains the EAGLE-4 checkout, not from inside it.
+Inside the checkout, `python -m sglang.launch_server` imports the source tree's `eagle_harness/`
+instead of the installed wheel.
 Use the ROCm 7.2 runtime and locally downloaded target and draft directories. Profile selection compares
 both local `config.json` files with the measured pair, so an unresolved Hub identifier is not sufficient.
 The profile applies to MI355X, including VF, BF16, TP1 and no quantization. It is not a generic AMD profile.
@@ -63,7 +66,9 @@ python -m sglang.launch_server --model-path "$MODEL" --tp-size 1 --dtype bfloat1
   --speculative-algorithm-config '{"mode":"serve"}'
 ```
 
-Look for `selected packaged MI355X cost profile` in the startup log. If it is absent, check the
+Look for `selected packaged MI355X cost profile` in the startup log. The profile path on that line
+must be inside the environment's `site-packages`. A path inside the checkout means the server started
+from inside it, so stop the server and start it from the parent directory. If the line is absent, check the
 GPU, dtype, TP size and local model configurations before assuming the measured profile is in use.
 An explicit `data_path` overrides automatic selection. The packaged profile includes measured costs
 for batch sizes 1, 8 and 32, but that does not qualify every batch size or context length.

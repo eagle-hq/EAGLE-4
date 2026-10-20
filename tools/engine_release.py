@@ -8,6 +8,11 @@ Uploads require a complete channel's wheels. The checksum manifest is uploaded
 last, so an interrupted upload cannot advertise an incomplete channel. Reruns
 verify existing bytes instead of replacing assets. Nothing creates a release.
 Pages indexes exactly the channels whose manifest the release carries.
+
+A channel serves our engine wheels plus, explicitly allow-listed, third-party
+wheels we rebuilt or repacked because no official index carries those builds.
+Each must match the channel's audited hash lock. ``upload --extend`` adds wheels
+to a released channel: the new manifest keeps every released entry unchanged.
 """
 
 import argparse
@@ -31,6 +36,17 @@ REQUIRED = {
     "rocm": {"sglang"},
 }
 WHEEL_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+\-]*\.whl")
+# Never list a package users can get from its official index (PyPI, PyTorch, AMD).
+THIRD_PARTY = {
+    "rocm": {
+        # AMD's vendor wheel with only its Triton requirement corrected; tools/repack_rocm_torch.py.
+        "torch-2.9.1+rocm7.2.0.lw.git7e1940d4-1eagle-cp310-cp310-linux_x86_64.whl",
+        # HIP build for gfx950 (PyPI's 0.4.7 is a CUDA build) plus its upstream THIRDPARTYNOTICES.txt.
+        "sglang_kernel-0.4.7-1eagle-cp310-cp310-linux_x86_64.whl",
+        # AITER as built in upstream SGLang's MI35x image; AMD publishes no wheel of it.
+        "amd_aiter-0.1.21.dev48+g4ad998328.d20260918-cp310-cp310-linux_x86_64.whl",
+    },
+}
 
 
 def validate_tag(tag: str) -> None:
@@ -48,7 +64,7 @@ def manifest_name(channel: str) -> str:
     return "harness-SHA256SUMS" if channel == "harness" else f"engine-{channel}-SHA256SUMS"
 
 
-def validate_rocm_runtime(wheels: list[Path], lock: Path) -> None:
+def read_lock(lock: Path) -> dict[str, tuple[str, str]]:
     expected = {}
     for line in lock.read_text().splitlines():
         if not line.strip() or line.startswith("#"):
@@ -62,6 +78,11 @@ def validate_rocm_runtime(wheels: list[Path], lock: Path) -> None:
         expected[project] = (match[2], match[3])
     if not expected:
         raise ValueError("empty ROCm runtime lock")
+    return expected
+
+
+def validate_rocm_runtime(wheels: list[Path], lock: Path) -> None:
+    expected = read_lock(lock)
     actual = {}
     for wheel in wheels:
         if not WHEEL_NAME.fullmatch(wheel.name):
@@ -76,7 +97,7 @@ def validate_rocm_runtime(wheels: list[Path], lock: Path) -> None:
     missing = expected.keys() - actual.keys()
     if missing:
         raise ValueError(f"missing locked ROCm packages: {', '.join(sorted(missing))}")
-    validate_wheels("rocm", [actual["sglang"]] if "sglang" in actual else [])
+    validate_wheels("rocm", [actual["sglang"]] if "sglang" in actual else [], rocm_lock=lock)
 
 
 def validate_wheels(channel: str, wheels: list[Path], *, rocm_lock: Path | None = None) -> None:
@@ -85,6 +106,7 @@ def validate_wheels(channel: str, wheels: list[Path], *, rocm_lock: Path | None 
         return
     names = set()
     projects = set()
+    lock = rocm_lock if rocm_lock is not None else ROCM_LOCK
     for wheel in wheels:
         if not WHEEL_NAME.fullmatch(wheel.name) or wheel.name in names:
             raise ValueError(f"invalid or duplicate wheel filename: {wheel.name}")
@@ -96,6 +118,10 @@ def validate_wheels(channel: str, wheels: list[Path], *, rocm_lock: Path | None 
             if project != "eagle-harness":
                 raise ValueError(f"not a harness wheel: {wheel.name}")
             projects.add(project)
+            continue
+        if wheel.name in THIRD_PARTY.get(channel, ()):
+            if read_lock(lock).get(project) != (version, mk_index.sha256(wheel)):
+                raise ValueError(f"third-party wheel does not match the ROCm lock: {wheel.name}")
             continue
         if project == "eagle-harness" or "+eagle." not in version:
             raise ValueError(f"not an Eagle engine wheel: {wheel.name}")
@@ -128,7 +154,7 @@ def verify(path: Path, digest: str) -> None:
 
 
 def upload(tag: str, channel: str, wheels: list[Path], *, repository: str = REPOSITORY,
-           draft: bool = False) -> None:
+           draft: bool = False, extend: bool = False) -> None:
     validate_tag(tag)
     validate_wheels(channel, wheels)
     if channel == "harness" and any(mk_index.metadata(w)["version"] != tag.removeprefix("v") for w in wheels):
@@ -153,15 +179,26 @@ def upload(tag: str, channel: str, wheels: list[Path], *, repository: str = REPO
         checksums[manifest.name] = mk_index.sha256(manifest)
         before = work / "before"
         before.mkdir()
-        # Preflight every conflict before uploading anything; never use --clobber.
+        replace_manifest = False
+        # Preflight every conflict before uploading anything. Only --extend may replace the
+        # manifest, and only with a superset whose released entries keep their digests.
         for path in files:
             if path.name in existing:
                 gh("release", "download", tag, "--pattern", path.name, "--dir", str(before), repository=repository)
+                if path is manifest and extend and mk_index.sha256(before / path.name) != checksums[path.name]:
+                    released = read_manifest(before / path.name)
+                    kept = {name: digest for name, digest in checksums.items() if name in released}
+                    if kept != released:
+                        raise ValueError(f"--extend must keep every entry of {path.name} unchanged")
+                    replace_manifest = True
+                    continue
                 verify(before / path.name, checksums[path.name])
         for path in files:
             verify(path, checksums[path.name])
             if path.name not in existing:
                 gh("release", "upload", tag, str(path), repository=repository)
+            elif path is manifest and replace_manifest:
+                gh("release", "upload", tag, str(path), "--clobber", repository=repository)
             after = work / "after" / path.name
             after.parent.mkdir(exist_ok=True)
             gh("release", "download", tag, "--pattern", path.name, "--output", str(after), repository=repository)
@@ -214,6 +251,8 @@ def main() -> None:
     upload_parser = commands.add_parser("upload", help="publish wheels to an existing GitHub Release")
     upload_parser.add_argument("--repository", default=REPOSITORY)
     upload_parser.add_argument("--draft", action="store_true", help="require a private repository and a draft release")
+    upload_parser.add_argument("--extend", action="store_true",
+                               help="add wheels to a released channel; its released entries must not change")
     upload_parser.add_argument("tag")
     upload_parser.add_argument("channel", choices=UPLOAD_CHANNELS)
     upload_parser.add_argument("wheels", type=Path, nargs="+")
@@ -223,7 +262,8 @@ def main() -> None:
     args = parser.parse_args()
     try:
         if args.command == "upload":
-            upload(args.tag, args.channel, args.wheels, repository=args.repository, draft=args.draft)
+            upload(args.tag, args.channel, args.wheels, repository=args.repository, draft=args.draft,
+                   extend=args.extend)
         else:
             pages(args.tag, args.output)
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
