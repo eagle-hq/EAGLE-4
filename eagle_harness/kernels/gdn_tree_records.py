@@ -4,10 +4,12 @@
 """AMD tree recurrence records and accepted-path replay for ROCm."""
 
 import functools
+import os
 
 import torch
 import triton
 import triton.language as tl
+import triton.language.extra.libdevice as tldevice
 
 from eagle_harness.kernels.gdn_tree_recurrence import _path_token as _gdn_tree_path_token
 
@@ -89,7 +91,8 @@ def _gdn_tree_records_kernel(
             b_h *= u_eg
             b_v = r_v - tl.sum(b_h * u_k[:, None], 0)
             b_v *= u_beta
-            b_h += u_k[:, None] * b_v[None, :]
+            # an explicit fma: the commit repeats exactly this rank-1 update (decayed state rounded, k * delta fused)
+            b_h = tl.fma(u_k[:, None], b_v[None, :], b_h)
             if d >= wfrom:
                 b_o = tl.sum(b_h * u_q[:, None], 0)
                 tl.store(o + (u_t * HV + i_hv) * V + o_v, b_o.to(o.dtype.element_ty), mask=mask_v)
@@ -99,6 +102,177 @@ def _gdn_tree_records_kernel(
                     if i_v == 0:
                         tl.store(p_node + V + o_k, u_k, mask=mask_k)
                         tl.store(p_node + V + K, u_eg)
+
+
+# The decay exp of the target's decode kernel: sglang's fla ``op.exp``, libdevice fast_expf under FLA_USE_FAST_OPS=1.
+_decode_exp = tldevice.fast_expf if os.environ.get("FLA_USE_FAST_OPS", "0") == "1" else tl.exp
+
+
+@triton.jit
+def _gdn_tree_records_decode_kernel(
+    q,  # (1, tokens, H, K)
+    k,
+    v,  # (1, tokens, HV, V), token-strided
+    a,  # (tokens, HV)
+    b,
+    A_log,  # [HV] fp32
+    dt_bias,  # [HV] fp32
+    o,  # (1, tokens, HV, V) contiguous
+    h0_source,  # fp32 state pool [slots, HV, V, K]
+    h0_indices,
+    stride_h0_source,
+    cu_seqlens,
+    records,  # (rows, steps, HV, REC) fp32: delta [0, V), key [V, V + K), decay at V + K
+    record_indices,
+    stride_records_row,
+    tree_paths,  # (batch, P, 2 + DMAX) int32: length, write_from, root path
+    stride_paths_seq,
+    stride_paths_path,
+    stride_q,
+    stride_k,
+    stride_v,
+    stride_a,
+    stride_b,
+    scale,
+    softplus_threshold,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    REC: tl.constexpr,
+    DMAX: tl.constexpr,
+    DMAX_P2: tl.constexpr,
+):
+    # The target's decode step (sglang fused_recurrent_gated_delta_rule_packed_decode_kernel) operation for operation,
+    # in its [V, K] tile with one-warp K reductions, replayed along one root path of the tree from the request state:
+    # every node's output and record are what plain decoding would compute for that node. The rank-1 update is a
+    # written FMA (the decode kernel's contracted form), which the records commit repeats.
+    i_v, i_nh, i_p = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_n, i_hv = i_nh // HV, i_nh % HV
+    i_h = i_hv // (HV // H)
+
+    bos = tl.load(cu_seqlens + i_n).to(tl.int64)
+    eos = tl.load(cu_seqlens + i_n + 1).to(tl.int64)
+    rec_idx = tl.load(record_indices + i_n).to(tl.int64)
+    p_path = tree_paths + i_n * stride_paths_seq + i_p * stride_paths_path
+    linear = rec_idx < 0
+    L = tl.where(linear, tl.where(i_p == 0, (eos - bos).to(tl.int32), 0), tl.load(p_path))
+    wfrom = tl.where(linear, 0, tl.load(p_path + 1))
+    if L > 0:
+        offs_d = tl.arange(0, DMAX_P2)
+        toks = tl.load(p_path + 2 + offs_d, mask=(offs_d < DMAX) & (offs_d < L) & (rec_idx >= 0)).to(tl.int64)
+        o_k = tl.arange(0, BK)
+        o_v = i_v * BV + tl.arange(0, BV)
+        mask_k = o_k < K
+        mask_v = o_v < V
+        mask_h = mask_v[:, None] & mask_k[None, :]
+        b_h = tl.zeros([BV, BK], dtype=tl.float32)
+        idx = tl.load(h0_indices + i_n).to(tl.int64)
+        if idx >= 0:
+            p_h0 = h0_source + idx * stride_h0_source + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+            b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
+        A_log_val = tl.load(A_log + i_hv).to(tl.float32)
+        dt_bias_val = tl.load(dt_bias + i_hv).to(tl.float32)
+        p_rec = records + rec_idx * stride_records_row + i_hv * REC
+
+        for d in range(0, L):
+            u_t = bos + _gdn_tree_path_token(toks, offs_d, d, linear)
+            b_q = tl.load(q + u_t * stride_q + i_h * K + o_k, mask=mask_k, other=0).to(tl.float32)
+            b_k = tl.load(k + u_t * stride_k + i_h * K + o_k, mask=mask_k, other=0).to(tl.float32)
+            b_v = tl.load(v + u_t * stride_v + i_hv * V + o_v, mask=mask_v, other=0).to(tl.float32)
+            b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
+            b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+            b_q = b_q * scale
+            a_val = tl.load(a + u_t * stride_a + i_hv).to(tl.float32)
+            b_val = tl.load(b + u_t * stride_b + i_hv).to(tl.float32)
+            x = a_val + dt_bias_val
+            softplus_x = tl.where(x <= softplus_threshold, tl.log(1.0 + tl.exp(x)), x)
+            g_val = -tl.exp(A_log_val) * softplus_x
+            beta_val = tl.sigmoid(b_val).to(b.dtype.element_ty).to(tl.float32)
+            b_eg = _decode_exp(g_val)
+            b_h *= b_eg
+            b_v -= tl.sum(b_h * b_k[None, :], 1)
+            b_v *= beta_val
+            b_h = tl.fma(b_v[:, None], b_k[None, :], b_h)
+            if d >= wfrom:
+                b_o = tl.sum(b_h * b_q[None, :], 1)
+                tl.store(o + (u_t * HV + i_hv) * V + o_v, b_o.to(o.dtype.element_ty), mask=mask_v)
+                if rec_idx >= 0:
+                    p_node = p_rec + (u_t - bos) * HV * REC
+                    tl.store(p_node + o_v, b_v, mask=mask_v)
+                    if i_v == 0:
+                        tl.store(p_node + V + o_k, b_k, mask=mask_k)
+                        tl.store(p_node + V + K, b_eg)
+
+
+def gdn_tree_records_decode_order_update(
+    A_log,
+    dt_bias,
+    q,
+    k,
+    v,
+    a,
+    b,
+    *,
+    state,
+    state_indices,
+    query_start_loc,
+    tree_paths,
+    records,
+    record_indices,
+    softplus_threshold: float = 20.0,
+    value_tile: int = 8,
+):
+    """Verify an fp32 pool's tree with the target's decode step along every root path, writing replay records
+    (:func:`_gdn_tree_records_decode_kernel`). The V tile is launch geometry only: the decode kernel's K reductions
+    stay within one warp at every tile. Returns the outputs, shaped like ``v``."""
+    assert state.dtype == torch.float32 and v.stride(-1) == 1 and v.stride(-2) == v.shape[-1]
+    _, _, heads, key_dim = k.shape
+    value_heads, value_dim = v.shape[2:]
+    batch = query_start_loc.numel() - 1
+    out = q.new_empty(v.shape)  # contiguous: q / k / v may be token-strided views of the input projection
+    width = tree_paths.shape[2] - 2
+    _gdn_tree_records_decode_kernel[(triton.cdiv(value_dim, value_tile), batch * value_heads, tree_paths.shape[1])](
+        q,
+        k,
+        v,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        out,
+        state,
+        state_indices,
+        state.stride(0),
+        query_start_loc,
+        records,
+        record_indices,
+        records.stride(0),
+        tree_paths,
+        tree_paths.stride(0),
+        tree_paths.stride(1),
+        q.stride(1),
+        k.stride(1),
+        v.stride(1),
+        a.stride(-2),
+        b.stride(-2),
+        key_dim**-0.5,
+        softplus_threshold,
+        H=heads,
+        HV=value_heads,
+        K=key_dim,
+        V=value_dim,
+        BK=triton.next_power_of_2(key_dim),
+        BV=value_tile,
+        REC=records.shape[-1],
+        DMAX=width,
+        DMAX_P2=triton.next_power_of_2(width),
+        num_warps=1,
+        num_stages=1,
+    )
+    return out
 
 
 @triton.jit
@@ -218,8 +392,10 @@ def _gdn_tree_records_commit_kernel(
             if ROUND_STATE:
                 if d > 0:
                     b_h = b_h.to(state.dtype.element_ty).to(tl.float32)
+            # the verify's update, operation for operation: without the explicit fma the compiler may fuse the decay
+            # into it instead (fma(h, decay, k * delta)), one ulp off the verified state in about half the elements
             b_h *= u_eg
-            b_h += u_k[:, None] * u_d[None, :]
+            b_h = tl.fma(u_k[:, None], u_d[None, :], b_h)
         tl.store(p_state + o_state, b_h.to(state.dtype.element_ty), mask=mask_h)
 
 
@@ -379,9 +555,27 @@ def gdn_tree_records_update(
     """Verify with compact replay records, preserving the pool's state precision.
 
     BF16/FP16 pools require ``tree_paths`` to round each parent before its descendants read it.
-    FP32 pools may use the parallel chunk recurrence, or the path replay without rounding, and commit without
-    intermediate rounding.
+    FP32 pools take the parallel chunk recurrence without ``tree_paths``, and with them the target's decode step
+    along every root path (:func:`gdn_tree_records_decode_order_update`: outputs and committed states bitwise equal to
+    plain decoding's); both commit without intermediate rounding.
     """
+    if tree_paths is not None and state.dtype == torch.float32:
+        # the target's decode step along every root path: outputs and committed states equal plain decoding's
+        return gdn_tree_records_decode_order_update(
+            A_log,
+            dt_bias,
+            q,
+            k,
+            v,
+            a,
+            b,
+            state=state,
+            state_indices=state_indices,
+            query_start_loc=query_start_loc,
+            tree_paths=tree_paths,
+            records=records,
+            record_indices=record_indices,
+        )
     if tree_paths is None:
         if state.dtype != torch.float32:
             raise ValueError("tree_paths are required for low-precision recurrent state")

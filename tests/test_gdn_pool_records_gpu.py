@@ -216,3 +216,107 @@ def test_pool_records_replay_paths_where_the_chunk_is_slower(monkeypatch, ssm_dt
     assert create(chunk=True)._uses_path_replay(1, 16) is (ssm_dtype != torch.float32)
     with pytest.raises(ValueError, match="replay records"):
         create(conv_state_len=2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
+@pytest.mark.parametrize("width,max_depth,batch", [(16, 12, 2), (64, 8, 1)])
+@pytest.mark.parametrize("value_tile", [8, 32])
+@pytest.mark.parametrize("strided", [False, True], ids=["contiguous", "strided"])
+def test_fp32_records_are_plain_decoding(width, max_depth, batch, value_tile, strided):
+    """An fp32 pool's records verify computes what plain greedy decoding computes: every node's output and the state its
+    records commit equal the target's decode kernel (sglang's packed Triton decode) run token by token along the
+    node's root path. Bitwise with the Triton the engine pins (3.8, torch 2.14), which contracts the decode kernel's
+    rank-1 update into the FMA the clone writes; within rounding with older Triton."""
+    decode_kernel = pytest.importorskip("sglang.srt.layers.attention.linear.kernels.gdn_triton")
+    from eagle_harness.kernels.gdn_tree import gdn_tree_ancestors, gdn_tree_paths_buffer
+    from eagle_harness.kernels.gdn_tree_records import (
+        gdn_tree_records_commit,
+        gdn_tree_records_decode_order_update,
+        gdn_tree_records_update,
+    )
+    from eagle_harness.sglang.gdn_tree_verify import record_width
+
+    device = "cuda"
+    gen = torch.Generator(device=device).manual_seed(width + value_tile)
+    rng = random.Random(width)
+    import triton
+
+    if tuple(int(part) for part in triton.__version__.split(".")[:2]) >= (3, 8):
+        same = torch.equal
+    else:
+        def same(got, want):
+            torch.testing.assert_close(got, want)
+            return True
+
+    def rand(*shape, dtype=torch.bfloat16, scale=1.0):
+        return (torch.randn(*shape, generator=gen, device=device) * scale).to(dtype)
+
+    trees = [_tree(rng, width, max_depth) for _ in range(batch)]
+    tokens = batch * width
+    if strided:
+        # serving hands the verify token-strided views of the layer's input projection (reads_strided_inputs)
+        projection = rand(tokens, 2 * H * K + HV * V + 64)
+        q, k, v = (projection[:, start : start + size].unflatten(1, shape).unsqueeze(0)
+                   for start, size, shape in ((0, H * K, (H, K)), (H * K, H * K, (H, K)), (2 * H * K, HV * V, (HV, V))))
+    else:
+        q, k, v = rand(1, tokens, H, K), rand(1, tokens, H, K), rand(1, tokens, HV, V)
+    a, b = rand(tokens, HV), rand(tokens, HV)
+    A_log, dt_bias = rand(HV, dtype=torch.float32, scale=0.5), rand(HV, dtype=torch.float32, scale=0.5)
+    pool = rand(batch + 2, HV, V, K, dtype=torch.float32, scale=0.05)
+    slots = torch.arange(1, batch + 1, dtype=torch.int32, device=device)
+    rows = torch.arange(batch, dtype=torch.int32, device=device)
+    qsl = torch.arange(batch + 1, dtype=torch.int32, device=device) * width
+
+    # plain decoding: one decode call per tree level, every node in a slot seeded from its parent's
+    states = torch.cat((pool, torch.zeros(tokens, HV, V, K, device=device)))
+    node_slots = torch.arange(tokens, device=device) + batch + 2  # int64: torch indexes with it
+    want = torch.empty_like(v)
+    mixed = torch.cat((q[0].flatten(1), k[0].flatten(1), v[0].flatten(1)), dim=1)
+    depth = [[0] * width for _ in trees]
+    for request, tree in enumerate(trees):
+        for node in range(1, width):
+            depth[request][node] = depth[request][tree[node]] + 1
+    for level in range(max_depth + 1):
+        level_rows = [r * width + n for r in range(batch) for n in range(width) if depth[r][n] == level]
+        if not level_rows:
+            break
+        for row in level_rows:
+            request, node = divmod(row, width)
+            up = trees[request][node]
+            source = slots[request].long() if up < 0 else node_slots[request * width + up]
+            states[node_slots[row]] = states[source]
+        index = torch.tensor(level_rows, dtype=torch.int64, device=device)
+        out = decode_kernel.TritonGDNKernel().packed_decode(
+            mixed_qkv=mixed[index].contiguous(),
+            a=a[index].contiguous(),
+            b=b[index].contiguous(),
+            A_log=A_log,
+            dt_bias=dt_bias,
+            scale=K**-0.5,
+            ssm_states=states,
+            cache_indices=node_slots[index].to(torch.int32),
+            num_v_heads=HV,
+            head_v_dim=V,
+        )
+        want[0, index] = out.view(len(level_rows), HV, V)
+
+    parent = torch.tensor(trees, dtype=torch.int32, device=device)
+    first = torch.tensor([_links(tree)[0] for tree in trees], dtype=torch.int32, device=device)
+    sibling = torch.tensor([_links(tree)[1] for tree in trees], dtype=torch.int32, device=device)
+    paths = gdn_tree_paths_buffer(batch, width, device)
+    ancestors = torch.empty(batch, 3, width, dtype=torch.int32, device=device)
+    gdn_tree_ancestors(first, sibling, parent, slots, width, ancestors, query_start_loc=qsl, paths=paths)
+    records = torch.zeros(batch + 1, width, HV, record_width(V, K), device=device)
+    inputs = (A_log, dt_bias, q, k, v, a, b)
+    tables = dict(state=pool, state_indices=slots, query_start_loc=qsl, tree_paths=paths, record_indices=rows)
+    got = gdn_tree_records_decode_order_update(*inputs, **tables, records=records, value_tile=value_tile)
+    assert same(got, want)
+    # the dispatcher picks this verify for an fp32 pool with a path table
+    dispatched = gdn_tree_records_update(*inputs, **tables, records=records.clone(), parent=parent, width=width)
+    assert same(dispatched, want)
+    for node in range(width):
+        committed = pool.clone().unsqueeze(0)
+        steps = torch.full((batch,), node, dtype=torch.int32, device=device)
+        gdn_tree_records_commit(committed, records.unsqueeze(0), slots, rows, steps, parent, False)
+        for request in range(batch):
+            assert same(committed[0, slots[request].long()], states[node_slots[request * width + node]])
