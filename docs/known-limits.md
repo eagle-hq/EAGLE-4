@@ -83,7 +83,7 @@ not write a successful `serve.sh`. See [calibration](calibration.md).
 
 ## Distribution
 
-The [install guide](install.md) describes the release path: `eagle-harness` packages on PyPI and GitHub Release,
+The [install guide](install.md) describes the release path: `eagle-harness` packages on PyPI,
 patched engine wheels on the GitHub Pages indexes, and images on GHCR. These destinations do not establish
 publication or image qualification. Private-index CUDA installation and request checks do not test the public
 URLs. AMD has a qualified private offline pip closure, but its fresh-install commands remain deferred

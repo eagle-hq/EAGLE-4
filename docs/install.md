@@ -15,8 +15,8 @@ then follow that engine's quickstart.
 
 [Release settings](release.env) is the single source for package pins, wheel indexes and container tags.
 The engine wheels belong to the GitHub release named by `EAGLE_RELEASE_ASSETS`. Its PEP 503 indexes
-separate CUDA and ROCm wheels. The `eagle-harness` release path is PyPI, with its wheels and source distribution
-also attached to the same GitHub Release. Publishing the public release runs `publish.yml` with PyPI trusted publishing.
+separate CUDA and ROCm wheels. The `eagle-harness` wheels and source distribution are published only to PyPI,
+not to the GitHub Release. Publishing the public release runs `publish.yml` with PyPI trusted publishing.
 
 These are release destinations, not evidence that publication has completed. The PyPI project and public
 artifacts are not yet available for this draft. Fresh CUDA environments installed private wheels and served
@@ -24,10 +24,6 @@ real requests, and the `eagle-harness` wheel and source-distribution forms passe
 used a private index, not the public URLs. The private SGLang image also passed serving and correctness
 checks. vLLM image qualification is pending, and the TokenSpeed image has not been built. Final release
 artifacts and registry publication require separate checks.
-If PyPI is unavailable after publication, download the matching `eagle-harness` wheel from the GitHub Release
-named by `EAGLE_RELEASE_ASSETS`, verify its release checksum, and install it with
-`python -m pip install /path/to/downloaded/eagle_harness-0.1.0-py3-none-any.whl` in the engine environment.
-Before the release assets exist, neither path is available.
 The private ROCm pip closure below was clean-installed and inference-tested. Its Docker recipe
 has not been container-qualified. Publication remains a separate release step.
 Do not replace an unavailable artifact with the stock engine or an unpinned package.
