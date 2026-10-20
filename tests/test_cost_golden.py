@@ -112,6 +112,28 @@ def test_decisions_match_fork(golden, calibrated):
         _replay(_model(root, intensity, case["case"]), case["script"])
 
 
+def test_chain_rounds_decide_with_the_fork_chain_rule(golden, calibrated):
+    """A top-1 chain's width decision (what the sglang drafter asks) is chain_stop: the golden chain decisions
+    replayed through tree_width (the last depth always ends the draft)."""
+    intensity, root = calibrated
+    if intensity is not ComputeIntensity.CHAIN:
+        pytest.skip("chain rule only")
+    for case in golden["decisions_chain_intensity"]:
+        cm = _model(root, intensity, case["case"])
+        assert cm.chain_rounds and cm.verifies_whole_draft and cm.deltas_budget(4) == cm.verify_num
+        decided = 0
+        for step in case["script"]:
+            if step["op"] == "update_interval":
+                cm.update_interval(*step["args"])
+            elif step["op"] == "chain":
+                depth, bs, deltas = step["args"]
+                d = cm.tree_width(depth, bs, cm.verify_num, None, deltas)
+                assert d.width in (1, -1)
+                assert d.stop == (step["out"] or depth == cm.tree_depth - 1), step
+                decided += step["out"]
+        assert decided > 0
+
+
 def _replay(cm: CostModel, script: list) -> None:
     row = None
     assert len(script) > 100

@@ -561,7 +561,8 @@ class DynamicDrafter:
         self._deltas_slot = depth
 
     def _decide(self, depth: int, bs: int, row: Optional[DraftCostRow], past: int, policy) -> bool:
-        """Decide whether to stop growing after the layer of ``depth`` (stop = True).
+        """Decide whether to stop growing after the layer of ``depth`` (stop = True); chain rounds decide with
+        :meth:`~eagle_harness.core.cost_model.CostModel.chain_stop`.
 
         The work deltas of a LAUNCH depth are already on their way to the host
         (the step's graph copies them); the next depth reads them.
@@ -575,8 +576,9 @@ class DynamicDrafter:
             self._launch_deltas(depth)
             return False
         spin_wait(self._deltas_ready)
-        # Row past - 1: deltas for verify budget ``past`` (sized by the cost model's bound, not the verify width).
-        deltas = self.steps.host_deltas.numpy()[self._deltas_slot, past - 1].tolist()
+        # Row budget - 1: deltas for the policy's verify budget (sized by the cost model's bound, not the verify width).
+        budget = policy.deltas_budget(past)
+        deltas = self.steps.host_deltas.numpy()[self._deltas_slot, budget - 1].tolist()
         return policy.tree_width(depth, bs, past, row, deltas).stop
 
     # ------------------------------------------------------------------ width
@@ -584,7 +586,9 @@ class DynamicDrafter:
         self, policy, scores: List[float], verify_count: int, bs: int, context: int, *, lagged: bool = True
     ) -> int:
         """The verify width from the policy, fed cumulative verify scores: the previous round's
-        (``lagged``), or this round's on the first round."""
+        (``lagged``), or this round's on the first round. A chain verifies every drafted token."""
+        if policy.verifies_whole_draft:
+            return verify_count
         width, _ = policy.verify_num_paged(scores, verify_count, bs, context, lagged=lagged)
         policy.record_verify_num(bs, width)
         return min(width, verify_count)

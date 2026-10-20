@@ -252,7 +252,7 @@ class EagleHarnessWorker(EAGLEWorkerV2):
         if schedule is None:
             logger.warning(
                 "EAGLE_HARNESS: no served chain round times with an acceptance profile under %s; the cost model "
-                "sizes each chain round (tree rule)",
+                "sizes each chain round (the chain-depth rule)",
                 config.data_path,
             )
             return None

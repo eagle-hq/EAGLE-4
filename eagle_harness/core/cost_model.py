@@ -203,10 +203,10 @@ class WidthDecision:
 class WidthStep(enum.Enum):
     """What ``tree_width`` needs at a depth."""
 
-    KEEP = "keep"  # tiny batch, depth < 2: keep the top-k width
+    KEEP = "keep"  # tiny batch, depth < 2 (a chain: depth 0): keep the top-k width
     LAST = "last"  # last depth: stop
-    LAUNCH = "launch"  # even depth: launch the score-delta copy, keep width
-    DECIDE = "decide"  # odd depth: decide from the host deltas
+    LAUNCH = "launch"  # even depth (a chain: odd): launch the score-delta copy, keep width
+    DECIDE = "decide"  # odd depth (a chain: even): decide from the host deltas
 
 
 def find_majority(nums: Sequence[int]) -> int:
@@ -544,9 +544,25 @@ class CostModel:
         return max(self.verify_num, 32, *_MIN_HISTORY_VERIFY.values())
 
     @property
+    def chain_rounds(self) -> bool:
+        """Rounds of a top-1 chain at chain intensity: sized by :meth:`chain_stop`, not the tree rule, and every
+        drafted token is verified."""
+        return self.intensity is ComputeIntensity.CHAIN and self.node_top_k == 1
+
+    @property
+    def verifies_whole_draft(self) -> bool:
+        """Whether a round verifies every drafted token, without the paged verify budget."""
+        return self.chain_rounds
+
+    def deltas_budget(self, past_verify_num: int) -> int:
+        """The verify budget whose work deltas a ``DECIDE`` step reads: the round's history budget, or the whole
+        chain for chain rounds."""
+        return self.verify_num if self.chain_rounds else past_verify_num
+
+    @property
     def launch_depths(self) -> tuple[int, ...]:
         """Depths at which :meth:`width_step` can return ``LAUNCH`` (the depths whose work deltas are read)."""
-        return tuple(d for d in range(0, self.tree_depth - 1, 2))
+        return tuple(range(1 if self.chain_rounds else 0, self.tree_depth - 1, 2))
 
     def record_verify_num(self, batch_size: int, verify_num: int) -> None:
         """Push this round's verify budget into the batch size's history."""
@@ -567,7 +583,16 @@ class CostModel:
         return min(self.node_top_k, 4)
 
     def width_step(self, depth: int) -> WidthStep:
-        """How the frontier width changes after depth ``depth``."""
+        """How the frontier width changes after depth ``depth``.
+
+        A chain round follows :meth:`chain_stop`'s pattern: depth 0 keeps, odd depths launch, even depths decide.
+        """
+        if self.chain_rounds:
+            if depth == self.tree_depth - 1:
+                return WidthStep.LAST
+            if depth == 0:
+                return WidthStep.KEEP
+            return WidthStep.LAUNCH if depth % 2 == 1 else WidthStep.DECIDE
         if self.tier.tiny and depth < 2:
             return WidthStep.KEEP
         if depth == self.tree_depth - 1:
@@ -597,9 +622,15 @@ class CostModel:
         """Width of the next draft level, or stop.
 
         ``deltas`` are the host copy of the top work-score deltas launched at
-        the previous (even) depth; only the ``DECIDE`` step reads them.
+        the previous (even; a chain: odd) depth; only the ``DECIDE`` step reads them.
+        A chain round decides with :meth:`chain_stop` and keeps width 1.
         """
         step = self.width_step(depth)
+        if self.chain_rounds and step is not WidthStep.LAST:
+            if step is WidthStep.DECIDE and deltas is None:
+                raise ValueError(f"tree_width at depth {depth} needs the host score deltas.")
+            stop = step is WidthStep.DECIDE and self.chain_stop(depth, batch_size, deltas)
+            return WidthDecision(1, past_verify_num, stop)
         if step is WidthStep.KEEP:
             return WidthDecision(self.node_top_k, past_verify_num, False)
         if step is WidthStep.LAST:
@@ -855,9 +886,18 @@ class FixedShapePolicy:
     launch_depths: tuple[int, ...] = ()
 
     @property
+    def verifies_whole_draft(self) -> bool:
+        """No: the verify budget comes from :meth:`verify_num_paged`."""
+        return False
+
+    @property
     def max_history_verify_num(self) -> int:
         """The widest verify budget this policy asks the tree for."""
         return self.verify_num
+
+    def deltas_budget(self, past_verify_num: int) -> int:
+        """Never read: this policy has no ``DECIDE`` step."""
+        return past_verify_num
 
     def width_step(self, depth: int) -> WidthStep:
         """Keep drafting through the last depth; never ask for host deltas."""

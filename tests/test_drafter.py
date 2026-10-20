@@ -154,6 +154,97 @@ def test_fixed_shape_runs_every_step_without_host_decisions():
     assert fixed.verify_count(1, 5) == 5 and fixed.history_verify_num(1) == WIDTH
 
 
+CHAIN_DEPTH, CHAIN_WIDTH = 15, 16
+
+
+class _ChainStopAt:
+    """A chain cost model whose chain rule stops at depth ``stop``; records the deltas each decision reads."""
+
+    def __init__(self, stop: int):
+        self.cost = CostModel(
+            tables={},
+            params=CostModelParams(),
+            intensity=ComputeIntensity.CHAIN,
+            node_top_k=1,
+            tree_depth=CHAIN_DEPTH,
+            verify_num=CHAIN_WIDTH,
+        )
+        self.stop, self.read = stop, []
+        self.cost.chain_stop = self._chain_stop
+
+    def _chain_stop(self, depth, bs, deltas):
+        self.read.append((depth, deltas))
+        return depth >= self.stop
+
+
+def _chain_sequenced(stop: int):
+    policy = _ChainStopAt(stop)
+    cost = policy.cost
+    slots = cost.launch_depths
+    tree = DraftTree(
+        TreeShape(1, CHAIN_DEPTH), 1, H, torch.float32, torch.device("cpu"), max_verify=CHAIN_WIDTH, delta_slots=slots
+    )
+    # Host deltas: slot d, budget row v - 1 holds (d, v) so a test can tell which row a decision read.
+    host = torch.tensor([[[float(d), float(v + 1)] for v in range(CHAIN_WIDTH)] for d in range(CHAIN_DEPTH)])
+    steps = _Steps(tree=tree, ran=[], max_step=CHAIN_DEPTH - 1, host_deltas=host)
+    drafter = DynamicDrafter.__new__(DynamicDrafter)
+    drafter.steps, drafter.tree, drafter.cost = steps, tree, cost
+    drafter.live, drafter.timer, drafter._seeding = None, None, None
+    drafter._deltas_ready, drafter._deltas_slot = _Event(), 0
+    drafter.policy = lambda bs: cost
+    return drafter, steps, policy
+
+
+@pytest.mark.parametrize("stop", [2, 6, 12])
+def test_chain_rounds_stop_with_the_chain_rule(stop):
+    """A top-1 chain at chain intensity asks the chain rule (CostModel.chain_stop), not the tree rule:
+    depth 0 keeps, odd depths launch their deltas, even depths decide from the whole-chain budget's deltas."""
+    drafter, steps, policy = _chain_sequenced(stop)
+    cost = policy.cost
+    assert cost.launch_depths == (1, 3, 5, 7, 9, 11, 13)
+    first = drafter._queue_until_decision(1, cost)
+    assert first == 2 and steps.ran == [1, 2] and drafter._deltas_slot == 1
+    for _ in range(16):  # a history of narrow verifies: the tree rule's budget would read another deltas row
+        cost.record_verify_num(1, 4)
+    past = cost.history_verify_num(1)
+    assert past < CHAIN_WIDTH
+    assert drafter._grow(1, first, None, past, cost) == stop + 1
+    assert steps.ran == list(range(1, stop + 1))
+    assert policy.read == [(d, [float(d - 1), float(CHAIN_WIDTH)]) for d in range(2, stop + 1, 2)]
+
+
+def test_chain_rounds_draft_the_whole_chain_when_the_rule_never_stops():
+    drafter, steps, policy = _chain_sequenced(stop=99)
+    cost = policy.cost
+    first = drafter._queue_until_decision(1, cost)
+    assert drafter._grow(1, first, None, cost.history_verify_num(1), cost) == CHAIN_DEPTH
+    assert steps.ran == list(range(1, CHAIN_DEPTH))
+    assert [d for d, _ in policy.read] == list(range(2, CHAIN_DEPTH - 1, 2))
+
+
+def test_chain_rounds_verify_every_drafted_token():
+    """A chain verifies every drafted token: the paged verify budget is not asked; the history is not touched."""
+    drafter, _, policy = _chain_sequenced(stop=4)
+    cost = policy.cost
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a chain round asked for the paged verify budget")
+
+    cost.verify_num_paged = refuse
+    history = [list(h) for h in cost._history]
+    assert cost.verify_count(1, 6) == 6
+    assert drafter._verify_width(cost, [0.0] * 6, 6, 1, 100) == 6
+    assert cost._history == history
+
+
+def test_tree_rounds_keep_the_tree_rule():
+    cost = _cost()
+    cost.tier.tiny = True
+    assert not cost.verifies_whole_draft and cost.deltas_budget(32) == 32
+    assert [cost.width_step(d).value for d in range(4)] == ["keep", "keep", "launch", "decide"]
+    assert cost.launch_depths == tuple(range(0, DEPTH - 1, 2))
+
+
 def test_batch_key_is_the_block_table_rows():
     from eagle_harness.sglang.drafter import batch_key
 
