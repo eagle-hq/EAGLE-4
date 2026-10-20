@@ -33,7 +33,7 @@ jobs:
         with:
           python-version: "3.12"
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b  # v5
-      - name: Download release wheels and verify both channel manifests
+      - name: Download release wheels and verify every released channel manifest
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}

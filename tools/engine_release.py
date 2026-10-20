@@ -7,6 +7,7 @@
 Uploads require a complete channel's wheels. The checksum manifest is uploaded
 last, so an interrupted upload cannot advertise an incomplete channel. Reruns
 verify existing bytes instead of replacing assets. Nothing creates a release.
+Pages indexes exactly the channels whose manifest the release carries.
 """
 
 import argparse
@@ -21,6 +22,7 @@ import mk_index
 
 REPOSITORY = "eagle-hq/EAGLE-4"
 CHANNELS = ("cu130", "rocm")
+CHANNEL_LABELS = {"cu130": "CUDA 13.0", "rocm": "ROCm"}
 UPLOAD_CHANNELS = (*CHANNELS, "harness")
 REQUIRED = {
     "harness": {"eagle-harness"},
@@ -134,13 +136,18 @@ def pages(tag: str, output: Path) -> None:
     validate_tag(tag)
     if output.exists():
         raise ValueError(f"output already exists: {output}; use a fresh staging directory")
-    release = json.loads(gh("release", "view", tag, "--json", "tagName,isDraft"))
+    release = json.loads(gh("release", "view", tag, "--json", "tagName,isDraft,assets"))
     if release["tagName"] != tag or release["isDraft"]:
         raise ValueError("Pages requires an existing, published release with the exact tag")
+    # A manifest is uploaded only after its whole channel verified, so its presence marks a released channel.
+    published = {asset["name"] for asset in release["assets"]}
+    channels = [channel for channel in CHANNELS if manifest_name(channel) in published]
+    if not channels:
+        raise ValueError(f"{tag} has no engine channel manifest; upload a complete channel first")
     with tempfile.TemporaryDirectory(prefix="engine-index-") as temporary:
         work = Path(temporary)
         site = work / "site"
-        for channel in CHANNELS:
+        for channel in channels:
             assets = work / channel
             assets.mkdir()
             manifest = manifest_name(channel)
@@ -158,10 +165,8 @@ def pages(tag: str, output: Path) -> None:
             destination = site / "whl" / channel
             shutil.copytree(index / "simple", destination)
             shutil.copyfile(assets / manifest, destination / "SHA256SUMS")
-        (site / "index.html").write_text(
-            '<!DOCTYPE html>\n<html><body><a href="whl/cu130/">CUDA 13.0</a>\n'
-            '<a href="whl/rocm/">ROCm</a></body></html>\n'
-        )
+        links = "".join(f'<a href="whl/{channel}/">{CHANNEL_LABELS[channel]}</a>\n' for channel in channels)
+        (site / "index.html").write_text(f"<!DOCTYPE html>\n<html><body>{links}</body></html>\n")
         (site / ".nojekyll").touch()
         shutil.copytree(site, output)
 

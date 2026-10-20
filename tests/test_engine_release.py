@@ -7,8 +7,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
+from urllib.parse import unquote
 import zipfile
 
 import pytest
@@ -130,6 +132,37 @@ def test_upload_verify_rerun_and_pages_without_wheel_payloads(tmp_path, release)
         assert "https://github.com/eagle-hq/EAGLE-4/releases/download/v0.1.0/sglang-" in page
         assert "#sha256=" in page
         assert ("eagle.4.rocm" in page) == (channel == "rocm")
+
+
+def test_pages_publishes_only_released_channels(tmp_path, release):
+    remote, _ = release
+    artifacts = wheels(tmp_path, "cu130")
+    assert command("upload", TAG, "cu130", *artifacts).returncode == 0
+    # Neither a harness manifest nor an unknown platform's manifest is an index channel.
+    (remote / "harness-SHA256SUMS").write_text(f"{'0' * 64}  eagle_harness-0.1.0-py3-none-any.whl\n")
+    (remote / "engine-cu999-SHA256SUMS").write_text(f"{'0' * 64}  invented-0.1.0-py3-none-any.whl\n")
+    site = tmp_path / "site"
+    result = command("pages", TAG, site)
+    assert result.returncode == 0, result.stderr
+    assert sorted(p.name for p in (site / "whl").iterdir()) == ["cu130"]
+    released = {p.name for p in remote.iterdir()}
+    for page in site.rglob("*.html"):
+        for href in re.findall(r'href="([^"]+)"', page.read_text()):
+            url = href.split("#", 1)[0]
+            if url.startswith("https://"):
+                assert unquote(url.rsplit("/", 1)[1]) in released, (page, href)
+            else:
+                assert (page.parent / url).exists(), (page, href)
+
+
+def test_pages_requires_a_released_channel(tmp_path, release):
+    remote, log = release
+    (remote / "harness-SHA256SUMS").write_text(f"{'0' * 64}  eagle_harness-0.1.0-py3-none-any.whl\n")
+    result = command("pages", TAG, tmp_path / "site")
+    assert result.returncode != 0
+    assert "no engine channel manifest" in result.stderr
+    assert not (tmp_path / "site").exists()
+    assert not any(args[1] == "download" for args in calls(log))
 
 
 def test_upload_conflict_preflight_has_no_write_side_effects(tmp_path, release):
