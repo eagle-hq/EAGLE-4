@@ -157,6 +157,14 @@ def gdn_records_replay(device: DeviceLike = None) -> bool:
     return _amd(device)
 
 
+def gdn_records_chunk(device: DeviceLike = None) -> bool:
+    """FP32 pools verify their replay records with the parallel chunk recurrence instead of the path replay
+    (:func:`eagle_harness.kernels.gdn_tree_records.gdn_tree_records_update`). AMD CDNA: measured faster there. NVIDIA
+    B300 (TP4 shapes, 16- and 64-node trees, 1-4 requests): the chunk is 2.5-9x slower per layer than the path replay,
+    so NVIDIA replays paths."""
+    return _amd(device)
+
+
 def side_stream_prelaunch(device: DeviceLike = None) -> bool:
     """The next round's draft extend and first draft steps are queued on a side stream at the end of a round
     (:meth:`eagle_harness.sglang.drafter.DynamicDrafter.prelaunch`). Measured off on AMD: MI355X TP1 bs1 rounds
@@ -175,7 +183,10 @@ def report() -> str:
         reason = unsupported_reason(i)
         lines.append(f"cuda:{i} {g.name} ({g.arch}): " + (f"OFF, {reason}" if reason else "supported"))
         if reason is None:
-            features = (native_candidate_tail, clusters, pdl, gluon_gdn, gdn_records_replay, side_stream_prelaunch)
+            features = (
+                native_candidate_tail, clusters, pdl, gluon_gdn, gdn_records_replay, gdn_records_chunk,
+                side_stream_prelaunch,
+            )
             lines.append("    " + ", ".join(f"{f.__name__}={'yes' if f(i) else 'no'}" for f in features))
     return "\n".join(lines)
 

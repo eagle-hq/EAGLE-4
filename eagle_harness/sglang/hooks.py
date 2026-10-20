@@ -115,6 +115,20 @@ HOOKS: tuple[Hook, ...] = (
     Hook(f"{_GRAPH_RUNNER_INFO}.is_draft_worker", (), FIELD),
     Hook(f"{_GRAPH_RUNNER_INFO}.device", (), FIELD),
     Hook(f"{_ALGO}.create_linear_attn_verify_extension", ("state",), OVERRIDE, _HARNESS_ALGO),
+    # Replay records in place of the GDN tree verify's snapshots (an engine without them keeps the snapshots).
+    Hook(
+        f"{_ALGO}.linear_attn_verify_record_width",
+        ("server_args", "head_v_dim", "head_k_dim"),
+        OVERRIDE,
+        _HARNESS_ALGO,
+        optional=True,
+    ),
+    Hook(
+        "sglang.srt.layers.attention.linear.verify_extension:LinearAttnStateLayout.verify_records",
+        (),
+        FIELD,
+        optional=True,
+    ),
     Hook(f"{_EXT}.init_cuda_graph_state", ("max_bs", "max_num_tokens"), OVERRIDE, _HARNESS_EXT),
     Hook(f"{_EXT}.begin_forward", ("layout", "in_graph"), OVERRIDE, _HARNESS_EXT),
     Hook(f"{_EXT}.reads_strided_inputs", (), OVERRIDE, _HARNESS_EXT),

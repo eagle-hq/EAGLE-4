@@ -379,7 +379,8 @@ def gdn_tree_records_update(
     """Verify with compact replay records, preserving the pool's state precision.
 
     BF16/FP16 pools require ``tree_paths`` to round each parent before its descendants read it.
-    FP32 pools may use the parallel chunk recurrence and commit without intermediate rounding.
+    FP32 pools may use the parallel chunk recurrence, or the path replay without rounding, and commit without
+    intermediate rounding.
     """
     if tree_paths is None:
         if state.dtype != torch.float32:
@@ -434,7 +435,7 @@ def gdn_tree_records_update(
         REC=records.shape[-1],
         DMAX=width,
         DMAX_P2=triton.next_power_of_2(width),
-        ROUND_STATE=True,
+        ROUND_STATE=state.dtype != torch.float32,
         num_warps=1,
         num_stages=1,
     )

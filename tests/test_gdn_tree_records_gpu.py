@@ -1,13 +1,13 @@
 # Copyright 2026 Eagle AI Corp.
 # SPDX-License-Identifier: LicenseRef-Eagle-4-Source-Available
 
-"""ROCm chunk records against an independent fp32 tree recurrence."""
+"""Chunk records (and the ROCm FlyDSL chunk) against an independent fp32 tree recurrence."""
 
 import pytest
 import torch
 
 
-@pytest.mark.skipif(not torch.cuda.is_available() or torch.version.hip is None, reason="ROCm GPU required")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
 @pytest.mark.parametrize("width,batch", [(1, 1), (8, 2), (16, 1), (32, 2)])
 @pytest.mark.parametrize("seed", [11, 41, 97])
 def test_chunk_records_and_commit(width, batch, seed):
@@ -52,7 +52,7 @@ def test_chunk_records_and_commit(width, batch, seed):
             states.append(current)
             expected[0, token] = (current * query[:, None, :]).sum(-1).to(v.dtype)
         snapshots.append(states)
-    for fly in [False, True]:
+    for fly in [False, True] if torch.version.hip else [False]:  # FlyDSL is ROCm-only
         out = gdn_tree_chunk_update(
             A,
             bias,

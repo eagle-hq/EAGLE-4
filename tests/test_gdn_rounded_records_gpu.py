@@ -1,21 +1,22 @@
 # Copyright 2026 Eagle AI Corp.
 # SPDX-License-Identifier: LicenseRef-Eagle-4-Source-Available
 
-"""ROCm replay records against independently rounded parent states."""
+"""GDN replay records against independently rounded parent states (16-bit pools) or the fp32 recurrence."""
 
 import pytest
 import torch
 
 
-@pytest.mark.skipif(not torch.cuda.is_available() or torch.version.hip is None, reason="ROCm GPU required")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
 @pytest.mark.parametrize("width,batch", [(1, 1), (8, 2), (16, 1), (32, 2)])
 @pytest.mark.parametrize("seed", [11, 41, 97])
-@pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float16, torch.float32])
 @pytest.mark.parametrize("rounded", [True, False], ids=["path_replay", "chunk"])
 def test_rounded_records_and_commit(width, batch, seed, state_dtype, rounded):
     """The rounded serving path and unrounded diagnostic chunk match their respective references.
 
-    The chunk is not a numerically equivalent substitute for low-precision parent rounding.
+    The chunk is not a numerically equivalent substitute for low-precision parent rounding. An fp32 pool rounds
+    nothing: its path replay is the fp32 recurrence (the NVIDIA serving path), as is its chunk.
     """
     from eagle_harness.kernels.gdn_tree_records import gdn_tree_chunk_update
     from eagle_harness.kernels.gdn_tree_records import gdn_tree_records_commit
@@ -94,6 +95,7 @@ def test_rounded_records_and_commit(width, batch, seed, state_dtype, rounded):
     torch.testing.assert_close(out.float(), expected.float(), atol=0.002, rtol=0.02)
     assert bool((rec[-1] == -999.0).all()), "unused record row changed"
     accepted = torch.full((batch,), width - 1, dtype=torch.int32, device=device)
+    rounded = rounded and state_dtype != torch.float32  # the commit rounds like the verify
     committed = state.clone().unsqueeze(0)
     gdn_tree_records_commit(committed, rec.unsqueeze(0), slots, rows, accepted, parent, rounded)
     for request in range(batch):
@@ -115,7 +117,7 @@ def test_rounded_records_and_commit(width, batch, seed, state_dtype, rounded):
     assert torch.equal(from_int64, committed)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available() or torch.version.hip is None, reason="ROCm GPU required")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
 def test_parent_rounding_does_not_accumulate_sub_ulp_decay():
     from eagle_harness.kernels.gdn_tree_records import gdn_tree_records_commit, gdn_tree_records_update
 
@@ -162,11 +164,12 @@ def test_parent_rounding_does_not_accumulate_sub_ulp_decay():
     assert torch.equal(committed[0], state)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available() or torch.version.hip is None, reason="ROCm GPU required")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
 @pytest.mark.parametrize("width,batch", [(16, 1), (32, 8)])
 def test_value_tile_does_not_change_results(monkeypatch, width, batch):
-    """The V block is a launch-geometry choice (one wave per program at every width): outputs and records are
-    bitwise equal for 8, 16 and 32 columns."""
+    """The V block is a launch-geometry choice: outputs and records are bitwise equal for 8, 16 and 32 columns on
+    CDNA (one wave per program at every width), and equal within rounding on CUDA, whose warp layout follows the
+    block."""
     from eagle_harness.kernels import gdn_tree_records as records_module
 
     device = "cuda"
@@ -217,8 +220,12 @@ def test_value_tile_does_not_change_results(monkeypatch, width, batch):
         )
         results[tile] = (out.clone(), rec)
     for tile in (16, 32):
-        assert torch.equal(results[tile][0], results[8][0]), f"outputs differ at V block {tile}"
-        assert torch.equal(results[tile][1], results[8][1]), f"records differ at V block {tile}"
+        for name, index in (("outputs", 0), ("records", 1)):
+            got, want = results[tile][index], results[8][index]
+            if torch.version.hip:
+                assert torch.equal(got, want), f"{name} differ at V block {tile}"
+            else:
+                torch.testing.assert_close(got, want, msg=f"{name} differ at V block {tile}")
 
 
 def test_value_tile_widens_with_the_program_count(monkeypatch):

@@ -27,6 +27,7 @@ def test_record_dispatch_is_platform_and_state_gated(monkeypatch, replay, can_co
     from eagle_harness.sglang.gdn_tree_verify import GDNTreeVerify
 
     monkeypatch.setattr(arch, "gdn_records_replay", lambda device=None: replay)
+    monkeypatch.setattr(arch, "gdn_records_chunk", lambda device=None: replay)  # the same platform (AMD) for both
     state = SimpleNamespace(
         has_state_snapshots=True,
         conv_state_len=3,

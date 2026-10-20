@@ -161,6 +161,22 @@ class EagleHarnessSpecAlgo(CustomSpecAlgo):
 
         return GDNTreeVerify.create(state)
 
+    def linear_attn_verify_record_width(self, server_args, *, head_v_dim: int, head_k_dim: int) -> int:
+        """H10: under ``--enable-linear-replayssm-spec`` a GDN tree verify keeps replay records (delta, key, decay)
+        in place of per-node state snapshots: the record width where the record kernels take the verify shape and
+        the commit may replay them (no radix tracking, no pipeline parallelism), else 0 (the engine then refuses the
+        tree under that flag)."""
+        from eagle_harness.sglang.gdn_tree_verify import record_width, records_cover
+
+        steps = get_spec().speculative_num_draft_tokens or 0
+        if (
+            getattr(server_args, "disable_radix_cache", False)
+            and getattr(server_args, "pp_size", 1) == 1
+            and records_cover(steps, head_v_dim, head_k_dim)
+        ):
+            return record_width(head_v_dim, head_k_dim)
+        return 0
+
     # ---- H5: block-table headroom
     def req_to_token_extra_len(self, page_size: int) -> int:
         """H5: block-table headroom for the largest tree."""

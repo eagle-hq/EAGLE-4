@@ -43,6 +43,16 @@ PATH_REPLAY_MAX_ROWS = 24
 PATH_REPLAY_MIN_WIDTH = 5
 
 
+def records_cover(steps: int, value_dim: int, key_dim: int) -> bool:
+    """Whether the replay-record kernels (:mod:`eagle_harness.kernels.gdn_tree_records`) take this verify shape."""
+    return steps <= 64 and key_dim >= 16 and key_dim & (key_dim - 1) == 0 and value_dim >= 64 and value_dim % 64 == 0
+
+
+def record_width(value_dim: int, key_dim: int) -> int:
+    """fp32 values per (node, v-head) replay record: delta [0, V), key [V, V + K), decay at V + K, padding."""
+    return value_dim + key_dim + 4
+
+
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: Apache-2.0
 # Modified by Eagle AI Corp.
@@ -54,6 +64,8 @@ class GDNTreeVerify(LinearAttnVerifyExtension):
         self.num_v_heads = num_v_heads
         self.fp32_state = fp32_state
         self.records: torch.Tensor | None = None
+        # The records are the pool's own (no snapshots exist); else they sit beside its snapshots.
+        self.pool_records = False
         self._graph_ancestors: Optional[torch.Tensor] = None
         self._graph_paths: Optional[torch.Tensor] = None
         # Tables of the forward being built or captured; None: not a tree verify.
@@ -64,32 +76,40 @@ class GDNTreeVerify(LinearAttnVerifyExtension):
     @classmethod
     def create(cls, state: LinearAttnStateLayout) -> Optional["GDNTreeVerify"]:
         """The extension for a backend with ``state``, or None where the tree kernels do not apply
-        (no per-step SSM snapshots, a conv width other than 4, a 32-bit conv state)."""
-        if not state.has_state_snapshots or state.conv_state_len != 3 or state.conv_dtype.itemsize != 2:
+        (no per-step SSM snapshots, a conv width other than 4, a 32-bit conv state).
+
+        A pool that keeps replay records in place of the snapshots (``state.verify_records``, asked for by
+        :meth:`EagleHarnessSpecAlgo.linear_attn_verify_record_width`) has no other verify path, so a layout the tree
+        kernels do not cover raises instead."""
+        pool_records = getattr(state, "verify_records", None)
+        if state.conv_state_len != 3 or state.conv_dtype.itemsize != 2 or not (
+            state.has_state_snapshots or pool_records is not None
+        ):
+            if pool_records is not None:
+                raise ValueError("eagle-harness: the pool keeps GDN replay records, but the tree kernels need a "
+                                 f"conv width of 4 and a 16-bit conv state (conv state {state.conv_state_len} wide, "
+                                 f"{state.conv_dtype})")
             logger.info("eagle-harness: GDN tree verify off (this target's state layout is not covered)")
             return None
         fp32 = state.ssm_dtype == torch.float32
         result = cls(state.device, num_v_heads=state.num_v_heads, fp32_state=fp32)
         shape = getattr(state, "snapshot_shape", ())
-        # Replay records need the engine's state-commit seam (no tracked/overlapped commits) and the snapshot layout.
-        if arch.gdn_records_replay(state.device) and getattr(state, "can_commit_state", False) and len(shape) == 6:
+        if pool_records is not None:
+            result.records, result.pool_records = pool_records, True
+        # Replay records beside the snapshots need the engine's state-commit seam (no tracked/overlapped commits).
+        elif arch.gdn_records_replay(state.device) and getattr(state, "can_commit_state", False) and len(shape) == 6:
             layers, rows, steps, heads, value_dim, key_dim = shape
-            if (
-                steps <= 64
-                and key_dim >= 16
-                and key_dim & (key_dim - 1) == 0
-                and value_dim >= 64
-                and value_dim % 64 == 0
-            ):
+            if records_cover(steps, value_dim, key_dim):
                 result.records = torch.zeros(
-                    (layers, rows, steps, heads, value_dim + key_dim + 4),
+                    (layers, rows, steps, heads, record_width(value_dim, key_dim)),
                     dtype=torch.float32,
                     device=state.device,
                 )
 
         logger.info(
             "eagle-harness: GDN tree verify on, %s",
-            "replay records (accepted path replayed into the state pool)"
+            ("replay records in place of state snapshots" if result.pool_records else "replay records")
+            + " (accepted path replayed into the state pool)"
             if result.records is not None
             else "per-node state snapshots",
         )
@@ -97,7 +117,8 @@ class GDNTreeVerify(LinearAttnVerifyExtension):
 
     def _uses_path_replay(self, bs: int, width: int) -> bool:
         if self.records is not None:
-            return not self.fp32_state
+            # 16-bit pools round each parent on the path; fp32 pools replay paths where the chunk is slower
+            return not self.fp32_state or not arch.gdn_records_chunk(self.device)
         return self.fp32_state and width >= PATH_REPLAY_MIN_WIDTH and bs * self.num_v_heads <= PATH_REPLAY_MAX_ROWS
 
     def init_cuda_graph_state(self, max_bs: int, max_num_tokens: int) -> None:
@@ -203,9 +224,13 @@ class GDNTreeVerify(LinearAttnVerifyExtension):
         if self.records is not None:
             from eagle_harness.kernels.gdn_tree_records import gdn_tree_records_update
 
-            assert intermediate_states.is_contiguous()
-            layer_index, remainder = divmod(intermediate_states.storage_offset(), intermediate_states.numel())
-            assert remainder == 0, "state snapshot layers must be contiguous slices"
+            if self.pool_records:
+                records = intermediate_states  # this layer's slice of the pool's records
+            else:
+                assert intermediate_states.is_contiguous()
+                layer_index, remainder = divmod(intermediate_states.storage_offset(), intermediate_states.numel())
+                assert remainder == 0, "state snapshot layers must be contiguous slices"
+                records = self.records[layer_index]
             return gdn_tree_records_update(
                 layer.A_log,
                 layer.dt_bias,
@@ -219,7 +244,7 @@ class GDNTreeVerify(LinearAttnVerifyExtension):
                 query_start_loc=query_start_loc,
                 parent=self._parent_token,
                 tree_paths=self._paths,
-                records=self.records[layer_index],
+                records=records,
                 record_indices=intermediate_state_indices,
                 width=self._ancestors.shape[-1],
             )
