@@ -90,11 +90,6 @@ def harness_config() -> HarnessConfig:
     return parse_harness_config(get_spec().speculative_algorithm_config)
 
 
-def harness_mode() -> Mode:
-    """The harness mode of this process."""
-    return harness_config().mode
-
-
 class EagleHarnessSpecAlgo(CustomSpecAlgo):
     """Algorithm-level hooks. One instance per process (the registry's)."""
 

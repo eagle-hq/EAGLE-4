@@ -49,7 +49,6 @@ def test_fits_write_tables_the_cost_model_loads(tmp_path):
     draft = (AttentionShape(1, 1, 4096), timings(draft_query_lens(1, ComputeIntensity.HIGH), 300.0, 15.0, 2.0))
     target = (AttentionShape(LAYERS), timings(sorted(verify_buckets(1, ComputeIntensity.HIGH)), 4500.0, 20.0, 1.0))
     fit_step_timings(paths, params, ComputeIntensity.HIGH, draft, target, tp_size=4)
-    assert paths.task_normal()
     table = load_cost_tables(paths.cost)[1]
     short, long = table.interval_index(300), table.interval_index(3900)
     verify = table.intervals[long].target

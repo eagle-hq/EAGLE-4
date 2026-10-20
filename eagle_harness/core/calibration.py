@@ -9,7 +9,6 @@ The files written here match the golden fixtures for the same raw measurements
 Layout under a calibration ``data_path``::
 
     config/measure_config.json            MeasureParams of the batch being measured
-    config/task_normal.json               [{"task_normal": bool}]: false = unstable, retry
     test/bs_<N>/{model,cache}_{slm,llm}/  raw timings (jsonl, one record per line)
     cost/bs_<N>/{cache,query,model}_{slm,llm}/  fitted costs (json)
 
@@ -23,7 +22,7 @@ import logging
 import os
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
@@ -150,15 +149,6 @@ class CalibrationPaths:
         """Store the measurement settings."""
         _save_json_lines(os.path.join(self.config, "measure_config.json"), [asdict(params)])
 
-    def set_task_normal(self, normal: bool) -> None:
-        """Store the ``task_normal`` flag of the calibration run."""
-        _save_json_lines(os.path.join(self.config, "task_normal.json"), [{"task_normal": normal}])
-
-    def task_normal(self) -> bool:
-        """The stored ``task_normal`` flag."""
-        rows = load_jsonl(os.path.join(self.config, "task_normal.json"))
-        return bool(rows[0]["task_normal"])
-
 
 @dataclass(frozen=True)
 class CacheSweepPlan:
@@ -263,10 +253,9 @@ def fit_cache_costs(
     batch_size: int,
     intensity: ComputeIntensity,
     fast: bool = False,
-    paths: Optional[CalibrationPaths] = None,
 ) -> float:
     """Per-interval attention cost per layer, per query length. Returns the
-    instability rate; above the limit, ``paths`` gets ``task_normal=false``."""
+    instability rate; above the limit, a warning is logged."""
     interval_data: Dict[int, Dict[int, List[float]]] = defaultdict(lambda: defaultdict(list))
     for qo_len in query_lens(category, batch_size, intensity, max_query_length):
         file_path = os.path.join(source, f"cache_qo_len_{qo_len}.jsonl")
@@ -290,8 +279,6 @@ def fit_cache_costs(
     instability = unstable / total if total > 0 else 0.0
     if instability >= (0.20 if fast else 0.25):
         logger.warning("High cache-cost instability: %.2f%%", instability * 100)
-        if paths is not None:
-            paths.set_task_normal(False)
 
     for interval_id in range((cache_length_stop - cache_length_start) // cache_length_step):
         sequence = means.get(interval_id, [0.0] * max_query_length)
@@ -340,7 +327,6 @@ def fit_query_costs(
     average: bool = False,
     sliding_window_layers: int = 0,
     sliding_window: int = 0,
-    paths: Optional[CalibrationPaths] = None,
 ) -> float:
     """Non-attention cost per query length: measured step minus fitted attention."""
     cache_costs = _load_cache_arrays(cache_source)
@@ -379,8 +365,6 @@ def fit_query_costs(
     instability = unstable / total if total > 0 else 0.0
     if instability >= 0.30:
         logger.warning("High query-cost instability: %.2f%%", instability * 100)
-        if paths is not None:
-            paths.set_task_normal(False)
     for qo_len in lens:
         file_path = os.path.join(target, f"query_{qo_len}.json")
         with open(file_path, "r+", encoding="utf-8") as f:
@@ -505,7 +489,6 @@ def fit_batch(
             batch_size=bs,
             intensity=intensity,
             fast=params.enable_fast_measurement,
-            paths=paths,
         )
     for model, shape, max_q, average in (
         (DRAFT, draft, params.node_top_k, (not params.enable_fast_measurement) or tp_size > 1),
@@ -525,7 +508,6 @@ def fit_batch(
             average=average,
             sliding_window_layers=shape.sliding_window_layers,
             sliding_window=shape.sliding_window,
-            paths=paths,
         )
     for model, shape, max_q, max_cache in (
         (DRAFT, draft, params.node_top_k, params.node_top_k),
@@ -595,7 +577,6 @@ def fit_step_timings(
 ) -> None:
     """Store the raw timings of one batch size and run all fits, from whole-step timings of the draft and the target."""
     paths.write_measure_params(params)
-    paths.set_task_normal(True)
     bs = params.batch_size
     for model, (shape, timings) in ((DRAFT, draft), (TARGET, target)):
         save_model_timings(
