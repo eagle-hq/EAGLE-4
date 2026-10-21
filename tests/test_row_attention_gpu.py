@@ -107,7 +107,7 @@ def test_tree_rows_attend_window_and_ancestors(bs, step, window, low, high):
 
     for b in range(bs):
         length = int(seq_lens[b])
-        start = max(length + step - 1 - window + 1, 0) if window > 0 else 0
+        start = max(length - window, 0) if window > 0 else 0  # the window frozen at the last committed position
         for lane in range(K):
             keys = torch.cat([req_to_token[req[b], start:length], ancestors[b, lane, :step]]).long()
             want = _reference(q[b * K + lane], k_buffer, v_buffer, keys, HEAD_DIM**-0.5)
@@ -182,19 +182,20 @@ def test_nemotron_window_boundary(heads, length, step):
             partial,
             lse,
             table,
-            req,
             seq,
             ancestors,
             rows_per_request=rows,
             step=step,
             window=window,
             scale=dim**-0.5,
+            launch=EXTEND_LAUNCH if step == 0 else STEP_LAUNCH,
+            table_rows=req,
         )
         return out.clone()
 
     got = run()
     for row in range(rows):
-        pos = length + (step - 1 if step else row)
+        pos = length - 1 if step else length + row  # a draft step's window ends at the last committed position
         start = max(pos - window + 1, 0)
         if step:
             assert ancestors is not None
@@ -205,7 +206,7 @@ def test_nemotron_window_boundary(heads, length, step):
         torch.testing.assert_close(got[row].float(), want, atol=2e-2, rtol=2e-2)
 
     # Every row excludes this prefix. Poisoning it must not affect the result.
-    dropped = max(length + (step - 1 if step else 0) - window + 1, 0)
+    dropped = max(length - window + (0 if step else 1), 0)
     k[table[0, :dropped].long()] = 100
     v[table[0, :dropped].long()] = -100
     assert torch.equal(got, run())

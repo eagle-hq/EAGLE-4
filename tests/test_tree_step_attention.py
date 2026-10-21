@@ -50,9 +50,9 @@ def test_tree_step_attention_matches_dense_torch(bs, step, committed, window, gr
     got = tree_step_attention(q, kv, table, table_block, committed_t, ancestors, d**-0.5, step=step, window=window)
     flat = kv.reshape(-1, kv_heads, 2 * d).repeat_interleave(group_size, dim=1).float()
     for b in range(bs):
-        # each row sees the committed keys inside the window of its position c + step - 1, then its own ancestors
+        # each row sees the window frozen at the last committed position c - 1, then its own ancestors
         c = committed[b]
-        start = min(max(0, c + step - window), c) if window else 0
+        start = max(0, c - window) if window else 0
         prefix = [int(table[b, p // table_block]) * table_block + p % table_block for p in range(start, c)]
         for lane in range(top_k):
             r = b * top_k + lane
@@ -119,7 +119,7 @@ def test_shared_rows_gqa_matches_torch_and_repeated_mha(group_size, packed, step
     for b in range(bs):
         length = int(lengths[b])
         for row in range(rows):
-            pos = length + (step - 1 if step else row)
+            pos = length - 1 if step else length + row  # a draft step's window ends at the last committed position
             start = max(0, pos - window + 1) if window else 0
             end = length if step else pos + 1
             selected = table[table_rows[b], min(start, end) : end]

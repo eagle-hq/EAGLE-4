@@ -6,8 +6,9 @@
 The rows of a request share most of their keys; :mod:`eagle_harness.kernels.row_attention` attends them, reading
 the keys through sglang's ``req_to_token`` (one token per page, rows picked by ``req_pool_indices``):
 
-- draft step ``i`` (``K`` frontier rows per request at position ``seq_len[b] + i - 1``): the committed draft KV inside
-  the draft's sliding window plus the row's ``i`` tree ancestors, whose KV slots :attr:`DraftTree.ancestors` keeps
+- draft step ``i`` (``K`` frontier rows per request at position ``seq_len[b] + i - 1``): the committed draft KV of the
+  window frozen at the round's last committed position, ``[seq_len[b] - window, seq_len[b] - 1]``, plus the row's
+  ``i`` tree ancestors, whose KV slots :attr:`DraftTree.ancestors` keeps
   (:meth:`DraftRowAttention.build_tree_rows` also allocates the step's slots and records them as the new ancestors);
 - draft extend (``W`` causal rows per request at ``seq_len[b] + j``): the positions ``[pos - window + 1, pos]``.
 

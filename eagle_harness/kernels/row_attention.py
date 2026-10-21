@@ -7,7 +7,8 @@ A request's rows see one range of its committed keys, read through its page tabl
 also see their own tree ancestors:
 
 - draft step ``step`` (``rows`` frontier rows per request, all at position ``seq_len + step - 1``): the committed keys
-  inside the draft's sliding window, the same for every row, plus the row's ``step`` ancestors (itself last);
+  of the window ending at the round's last committed position, ``[seq_len - window, seq_len - 1]`` (frozen for the
+  round, as the draft was trained), the same for every row, plus the row's ``step`` ancestors (itself last);
 - draft extend (``step == 0``; row ``j`` at ``seq_len + j``): the keys ``[pos - window + 1, pos]`` of its own position.
 
 One program per (request, head, key split) loads each key and value of the request's range once for all its rows
@@ -135,8 +136,8 @@ def _rows_attention_kernel(
         if EXTEND:
             first = tl.min(tl.where(row_ok, lo, 2147483647), 0)
             last = tl.max(tl.where(row_ok, hi, -1), 0)
-        else:  # every row sees the committed keys of the window at seq_len + step - 1
-            first = tl.minimum(window_start(seq_len + step - 1, window), seq_len)
+        else:  # every row sees the committed keys of the window frozen at the last committed position
+            first = window_start(seq_len - 1, window)
             last = seq_len - 1
         if table_rows is None:
             row_pages = table + b * stride_table

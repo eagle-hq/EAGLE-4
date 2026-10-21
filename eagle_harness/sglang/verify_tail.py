@@ -25,7 +25,7 @@ import torch
 from sglang.srt.speculative.eagle_info import EagleVerifyInput
 
 from eagle_harness.core.draft_tree import DraftTree, VerifySelection
-from eagle_harness.sglang.graph_pool import graph_memory_pool
+from eagle_harness.sglang.graph_pool import capture
 
 # (batch size, tree selection, num_steps, num_draft_tokens) -> sglang's verify input.
 BuildInput = Callable[[int, VerifySelection, int, int], EagleVerifyInput]
@@ -41,10 +41,7 @@ class Ranking(NamedTuple):
 def _capture(body: Callable[[], object]):
     """Run ``body`` once eagerly (Triton compiles), then capture it; returns ``(graph, outputs)``."""
     body()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph, pool=graph_memory_pool(), capture_error_mode="thread_local"):
-        outputs = body()
-    return graph, outputs
+    return capture(body)
 
 
 class VerifyTail:

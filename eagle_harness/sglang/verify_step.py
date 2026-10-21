@@ -30,7 +30,7 @@ import torch
 from sglang.srt.speculative.eagle_worker_common import VerifyAcceptInput, VerifyAcceptResult, VerifyAcceptStep
 
 from eagle_harness.kernels.accept_tail import Accepted, accept_tail, compact_rows
-from eagle_harness.sglang.graph_pool import graph_memory_pool
+from eagle_harness.sglang.graph_pool import capture
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import ScheduleBatch
@@ -82,10 +82,7 @@ class AcceptTailGraphs:
                 if len(self._seen) < 4 * MAX_TAIL_GRAPHS:
                     self._seen.add(key)
                 return body()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, pool=graph_memory_pool(), capture_error_mode="thread_local"):
-                outputs = body()
-            entry = self._graphs[key] = (graph, outputs)
+            entry = self._graphs[key] = capture(body)
             if len(self._graphs) == MAX_TAIL_GRAPHS:
                 logger.warning("eagle-harness: %d accept-tail graphs; new verify layouts run eagerly", MAX_TAIL_GRAPHS)
         graph, outputs = entry

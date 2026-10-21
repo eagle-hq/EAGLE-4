@@ -7,7 +7,8 @@ Checks supported keys and structural constraints in a transformers config.
 Pure Python: no engine, no GPU.
 
 Sliding-window semantics, as trained: at draft depth d a query attends to at
-most W context keys ending at it plus the d draft tokens of its own chain.
+most W context keys, ending at the round's last committed position, plus the
+d draft tokens of its own chain.
 Activation: an explicit ``layer_types`` wins, then ``use_sliding_window``, and
 a positive ``sliding_window`` alone enables the window. Single-layer drafts only.
 """

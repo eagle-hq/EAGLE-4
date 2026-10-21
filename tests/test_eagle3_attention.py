@@ -47,7 +47,7 @@ def test_native_grouped_query_draft_rows(step, window):
         table_rows=req,
     )
     for row in range(4):
-        position = 16 + (row if step == 0 else step - 1)
+        position = 16 + row if step == 0 else 15  # a draft step's window ends at the last committed position
         start = max(0, position - window + 1) if window else 0
         keys = list(range(start, position + 1 if step == 0 else 16))
         if step:
