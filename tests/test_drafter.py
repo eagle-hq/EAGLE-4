@@ -249,6 +249,17 @@ def test_chain_rounds_verify_every_drafted_token():
     assert cost._history == history
 
 
+def test_narrow_chains_keep_the_tree_rule():
+    """The chain rule needs the 16-token chain's cost index; a width-8 chain (live costs index 0, 1, 3, 5, 7) keeps the
+    tree rule instead of failing its first round."""
+    cost = CostModel(
+        tables={}, params=CostModelParams(), intensity=ComputeIntensity.CHAIN, node_top_k=1, tree_depth=7, verify_num=8
+    )
+    assert not cost.chain_rounds and not cost.verifies_whole_draft
+    assert cost.launch_depths == (0, 2, 4)
+    assert _ChainStopAt(stop=2).cost.chain_rounds
+
+
 def test_tree_rounds_keep_the_tree_rule():
     cost = _cost()
     cost.tier.tiny = True

@@ -502,8 +502,15 @@ class CostModel:
     @property
     def chain_rounds(self) -> bool:
         """Rounds of a top-1 chain at chain intensity: sized by :meth:`chain_stop`, not the tree rule, and every
-        drafted token is verified."""
-        return self.intensity is ComputeIntensity.CHAIN and self.node_top_k == 1
+        drafted token is verified.
+
+        The chain rule prices the full 16-token chain (its cost index); a narrower chain keeps the tree rule.
+        """
+        return (
+            self.intensity is ComputeIntensity.CHAIN
+            and self.node_top_k == 1
+            and self.verify_num == _CHAIN_COST_INDEX[-1] + 1
+        )
 
     @property
     def verifies_whole_draft(self) -> bool:
