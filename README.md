@@ -150,7 +150,7 @@ the [SGLang quickstart](docs/quickstart-sglang.md):
 python -m sglang.launch_server --model-path "$MODEL" --tp-size 4 --dtype bfloat16 \
   --trust-remote-code --attention-backend flashinfer --page-size 1 \
   --max-running-requests 32 --cuda-graph-max-bs-decode 32 \
-  --disable-overlap-schedule --disable-prefill-cuda-graph --cuda-graph-backend-decode full \
+  --disable-overlap-schedule --cuda-graph-backend-decode full \
   --mem-fraction-static 0.75 --context-length 196608 --max-total-tokens 196608 \
   --chunked-prefill-size 16384 --mamba-ssm-dtype bfloat16 --disable-radix-cache \
   --reasoning-parser qwen3 --random-seed 721 --skip-server-warmup \
