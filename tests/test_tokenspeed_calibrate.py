@@ -107,9 +107,9 @@ def test_lane_masks():
     assert lane_mask(3, 16, causal=True) == [0b1, 0b11, 0b111]
     # Two depths of four lanes: lane r sees its own slot at each depth.
     assert lane_mask(4, 8, causal=False) == [0b10001, 0b100010, 0b1000100, 0b10001000]
-    # Key 63 is the sign bit of word 0; key 64 starts word 1.
-    words = lane_mask(1, 128, causal=False)
-    assert len(words) == 2 and words[0] == 1 and words[1] == 0
+    # 64 lanes over two depths: lane r sees keys r (word 0) and 64 + r (word 1); key 63 is word 0's sign bit.
+    words = lane_mask(64, 128, causal=False)
+    assert words[:2] == [1, 1] and words[126:] == [-(1 << 63), -(1 << 63)]
     assert lane_mask(64, 64, causal=True)[63] == -1
 
 
@@ -212,6 +212,6 @@ def test_attention_records_time_every_length_for_every_width(rows, window, slidi
     )  # fmt: skip
     lengths = [kv for kv in plan.cache_lengths() if kv >= plan.kv_step]
     assert [(r.query_length, r.cache_length) for r in records] == [(w, kv) for kv in lengths for w in (1, 8)]
-    assert all(r.measure_count == plan.num_layers and r.time_intervals > 0 for r in records)
+    assert all(r.measure_count == plan.num_layers and r.time_us > 0 for r in records)
     # Widths that run the same rows share one timing per length.
-    assert all(a.time_intervals == b.time_intervals for a, b in zip(records[::2], records[1::2]))
+    assert all(a.time_us == b.time_us for a, b in zip(records[::2], records[1::2]))
