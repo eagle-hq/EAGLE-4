@@ -78,11 +78,6 @@ HOOK_MAP: Tuple[HookUse, ...] = (
         "gpu",
     ),
     HookUse(
-        "H7 per-width verify graphs",
-        "vllm.v1.worker.gpu.spec_decode.speculator:BaseSpeculator.uses_varlen_verify_graphs",
-        "gpu",
-    ),
-    HookUse(
         "tree attention backend (H9 plan)", "vllm.v1.attention.backends.registry:AttentionBackendEnum.CUSTOM", "gpu"
     ),
     HookUse("H2 request admission (no logprobs, text only)", "", "none"),
