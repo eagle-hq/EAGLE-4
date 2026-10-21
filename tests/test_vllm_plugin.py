@@ -492,22 +492,64 @@ def test_draft_aux_norms_run_on_the_kernel_ops(monkeypatch):
     assert events == ["enter", "combine", "exit"]
 
 
-def test_package_logs_through_vllms_handler():
-    import logging
+@pytest.fixture
+def unconfigured_vllm_logging(monkeypatch):
+    """Logging as vLLM's CLI has it when it loads plugins (parser setup): nothing configured. Restores the loggers
+    vLLM's configuration replaces."""
+    import vllm.logger as vllm_logger
 
-    from eagle_harness.vllm.plugin import _log_through_vllm
+    loggers = [logging.getLogger(name) for name in ("eagle_harness", "vllm")]
+    saved = [(logger.level, logger.propagate) for logger in loggers]
+    for logger in loggers:
+        monkeypatch.setattr(logger, "handlers", [])
+        logger.setLevel(logging.NOTSET)
+        logger.propagate = True
+    monkeypatch.setattr(vllm_logger, "_last_configured_logging_config", None)
+    factory = logging.getLogRecordFactory()
+    yield
+    logging.setLogRecordFactory(factory)
+    for logger, (level, propagate) in zip(loggers, saved):
+        logger.setLevel(level)
+        logger.propagate = propagate
 
-    ours, theirs = logging.getLogger("eagle_harness"), logging.getLogger("vllm")
-    saved = (list(ours.handlers), ours.level, ours.propagate, list(theirs.handlers))
-    try:
-        ours.handlers.clear()
-        handler = logging.StreamHandler()
-        theirs.addHandler(handler)
-        _log_through_vllm()
-        assert handler in ours.handlers and not ours.propagate
-    finally:
-        ours.handlers[:], ours.level, ours.propagate = saved[0], saved[1], saved[2]
-        theirs.handlers[:] = saved[3]
+
+def test_tree_schedule_is_logged_through_vllm_logging_configured_after_plugin_load(unconfigured_vllm_logging, tmp_path):
+    """vLLM's CLI loads plugins while it builds its parser and configures logging only after parsing; the tree
+    schedule, resolved later, is logged at INFO through vLLM's handler with the rounds file's path, sha256 and widths."""
+    import hashlib
+    import io
+    import shutil
+    from importlib.resources import files
+
+    from vllm.logger import configure_logging_from_args
+
+    from eagle_harness.core.chain_width import TREE_ROUNDS_FILE
+    from eagle_harness.vllm.config import measured_tree_schedule
+
+    plugin._log_through_vllm()  # load_general_plugins() during parser setup
+    configure_logging_from_args(SimpleNamespace())  # after parse_args()
+    (handler,) = logging.getLogger("vllm").handlers
+    stream = io.StringIO()
+    handler.setStream(stream)
+    rounds = tmp_path / TREE_ROUNDS_FILE
+    rounds.parent.mkdir()
+    shutil.copyfile(str(files("eagle_harness.core").joinpath("profiles/vllm-qwen38-tp4", TREE_ROUNDS_FILE)), rounds)
+    parsed = parse_method_config(
+        {"mode": "static", "node_top_k": 4, "tree_depth": 14, "max_verify_width": 16, "data_path": str(tmp_path)}
+    )
+    assert measured_tree_schedule(parsed) is not None
+    (line,) = [line for line in stream.getvalue().splitlines() if "tree verify width per batch size" in line]
+    assert " INFO " in line
+    assert str(rounds) in line and hashlib.sha256(rounds.read_bytes()).hexdigest() in line
+    assert "(1, 19, 16), (20, 512, 4)" in line  # the packaged schedule: 16 wide below batch 20, 4 from there
+
+
+def test_bridge_keeps_a_users_own_logging(unconfigured_vllm_logging):
+    ours = logging.getLogger("eagle_harness")
+    own = logging.NullHandler()
+    ours.addHandler(own)
+    plugin._log_through_vllm()
+    assert ours.handlers == [own] and ours.propagate
 
 
 # A reduced-size Nemotron EAGLE-4 draft configuration with the same layer structures.

@@ -38,12 +38,15 @@ Pure Python over ``core``: no GPU and no vLLM import at module load.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, List, Literal, Mapping, Tuple
 
 from eagle_harness.core.chain_width import (
     PROFILE_FILE,
+    TREE_ROUNDS_FILE,
     chain_widths,
     load_tree_rounds,
     merge_ranges,
@@ -297,7 +300,10 @@ def measured_tree_schedule(parsed: VllmMethodConfig, key: CostKey | None = None)
     widths = served_tree_schedule(rounds, parsed.max_verify_width, limit)
     if widths is None:
         return None
-    logger.info("eagle_harness: tree verify width per batch size from %s: %s", data_path, widths)
+    path = os.path.join(data_path, TREE_ROUNDS_FILE)
+    with open(path, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    logger.info("eagle_harness: tree verify width per batch size from %s (sha256 %s): %s", path, digest, widths)
     return _draft_token_schedule(widths, limit)
 
 

@@ -202,6 +202,30 @@ def test_rocm_environment_is_logged_and_checked(registered, monkeypatch, caplog,
     assert ("without SGLANG_USE_AITER=1" in logged) is warns
 
 
+def test_harness_info_reaches_sglangs_logging(monkeypatch):
+    """sglang configures the root logger (configure_logger) in every server process, and the package's loggers
+    propagate to it: the harness's INFO lines after that (cost profile, chain widths) reach sglang's handler."""
+    import io
+    import logging
+
+    from sglang.srt.utils.common import configure_logger
+
+    root, ours = logging.getLogger(), logging.getLogger("eagle_harness")
+    monkeypatch.setattr(root, "handlers", list(root.handlers))
+    monkeypatch.setattr(ours, "handlers", [])  # an sglang process: nothing bridges the package elsewhere
+    monkeypatch.setattr(ours, "propagate", True)
+    level = root.level
+    try:
+        configure_logger(SimpleNamespace(log_level="info"))
+        (handler,) = root.handlers
+        stream = io.StringIO()
+        handler.setStream(stream)
+        logging.getLogger("eagle_harness.sglang.worker").info("EAGLE_HARNESS: chain widths per batch size probe")
+    finally:
+        root.setLevel(level)
+    assert "EAGLE_HARNESS: chain widths per batch size probe" in stream.getvalue()
+
+
 def test_config_still_rejected_for_builtins(registered):
     with pytest.raises(ValueError, match="algorithm-config"):
         handle_speculative_decoding(_server_args(speculative_algorithm="EAGLE"))

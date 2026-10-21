@@ -76,12 +76,25 @@ def _async_scheduling_opt_in(spec_cls: type) -> dict:
     return {}
 
 
+class _ThroughVllm(logging.Handler):
+    """Hands each package record to vLLM's ``vllm`` logger, judged by that logger's level and handlers as they are
+    when the record is made."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        engine = logging.getLogger("vllm")
+        if engine.isEnabledFor(record.levelno):
+            engine.handle(record)
+
+
 def _log_through_vllm() -> None:
-    """The package's loggers write where vLLM's do (vLLM configures only its own ``vllm`` logger, which does not
-    propagate, so ``eagle_harness.*`` records were dropped in vLLM processes)."""
-    ours, theirs = logging.getLogger("eagle_harness"), logging.getLogger("vllm")
-    if theirs.handlers and not ours.handlers:
-        for handler in theirs.handlers:
-            ours.addHandler(handler)
-        ours.setLevel(theirs.level)
-        ours.propagate = False
+    """The package's loggers write where vLLM's do. vLLM configures only its own ``vllm`` logger, which does not
+    propagate, and its CLI loads plugins before it configures logging: handlers copied at registration would be none,
+    and the package's INFO records would stay below root's WARNING. So the records go to that logger when they are
+    made, and its level is the gate."""
+    ours = logging.getLogger("eagle_harness")
+    if ours.handlers:  # bridged already, or configured by the user
+        return
+    ours.addHandler(_ThroughVllm())
+    if ours.level == logging.NOTSET:
+        ours.setLevel(logging.DEBUG)
+    ours.propagate = False
