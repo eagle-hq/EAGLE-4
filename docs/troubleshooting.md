@@ -32,7 +32,7 @@ With `--kernels`, the last line says where the native library came from:
 On a machine without engines and without a GPU the output is:
 
 ```text
-eagle-harness 0.1.0.dev0 (.../eagle_harness/__init__.py)
+eagle-harness 0.1.1 (.../eagle_harness/__init__.py)
 sglang: not installed
 vllm: not installed
 tokenspeed: not installed
@@ -75,7 +75,7 @@ inputs.`). Serve them from a server without the method.
 - Look for the startup warning `native CUDA kernels unavailable`. The Triton fallback gives the same results more
   slowly.
 - On vLLM, `no cost tables price a draft step ...` means the lossless stop drafts every step that could
-  still change the verify set. Registration-time INFO messages can be suppressed before logging is configured.
-  An absent schedule-load message alone does not show that `rounds/tree.json` was ignored. Verify the
-  configured `data_path` and runtime draft-width counters rather than relying only on that message.
+  still change the verify set. A loaded `rounds/tree.json` logs
+  `eagle_harness: tree verify width per batch size from <path> (sha256 <digest>)` at startup; vLLM's log level
+  applies to EAGLE-4's messages, so that line needs INFO.
 - Run `python -m eagle_harness.kernels.arch` to see which kernel tier each GPU gets.

@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/eagle-hq/EAGLE-4/releases/tag/v0.1.0"><img src="https://img.shields.io/badge/eagle--harness-v0.1.0-orange.svg" alt="eagle-harness 0.1.0"></a>
+  <a href="https://github.com/eagle-hq/EAGLE-4/releases/tag/v0.1.1"><img src="https://img.shields.io/badge/eagle--harness-v0.1.1-orange.svg" alt="eagle-harness 0.1.1"></a>
   <a href="https://github.com/eagle-hq/EAGLE-4/issues" target="_blank"><img src="https://img.shields.io/badge/Maintained%3F-yes-green.svg" alt="Maintenance"></a>
   <a href="https://github.com/eagle-hq/EAGLE-4/pulls" target="_blank"><img src="https://img.shields.io/badge/Contributions-welcome-brightgreen.svg" alt="Contributions welcome"></a>
 </p>
@@ -75,7 +75,8 @@ The patched engines ship as pinned wheels and container images, not as source tr
 
 Stock engine packages do not carry the hooks. [Release settings](docs/release.env) is the one place that holds
 every version pin, index URL and image tag. The wheels are also attached to the
-[v0.1.0 GitHub release](https://github.com/eagle-hq/EAGLE-4/releases/tag/v0.1.0).
+[v0.1.0 GitHub release](https://github.com/eagle-hq/EAGLE-4/releases/tag/v0.1.0): the engines did not change in 0.1.1.
+The 0.1.0 images carry `eagle-harness` 0.1.0.
 
 ## Measured results
 
@@ -101,7 +102,7 @@ correctness gate even when the speculative server is faster.
 
 ## Install
 
-Install one patched engine per environment, then `eagle-harness==0.1.0` from PyPI. The
+Install one patched engine per environment, then `eagle-harness==0.1.1` from PyPI. The
 [v0.1.0 GitHub release](https://github.com/eagle-hq/EAGLE-4/releases/tag/v0.1.0) carries the engine wheels, not `eagle-harness`.
 Use Python 3.12 for the CUDA engines and Python 3.10 for the ROCm wheel. The commands read their pins from the
 release settings file in the checkout. Run them, and start servers, from the directory that contains the checkout.
@@ -119,16 +120,18 @@ python3.12 -m venv .venv-sglang && source .venv-sglang/bin/activate
 python -m pip install --upgrade pip
 python -m pip install --extra-index-url "$EAGLE_CUDA_INDEX" \
   --extra-index-url "$EAGLE_TORCH_CUDA_INDEX" "sglang==$EAGLE_SGLANG_VERSION" 'flashinfer-python>=0.7.2'
-python -m pip install "eagle-harness==$EAGLE_VERSION"
+python -m pip install "eagle-harness==$EAGLE_HARNESS_VERSION"
 eagle-harness-check
 ```
 
-Or open the release image, which has the engine and EAGLE-4 installed:
+Or open the release image, which has the engine and EAGLE-4 installed. The 0.1.0 image carries `eagle-harness`
+0.1.0; upgrade it inside the container:
 
 ```bash
 docker run --rm --gpus all --ipc host -it \
   -p 127.0.0.1:30000:30000 -v "$PWD/models:/models:ro" \
   --entrypoint bash "$EAGLE_SGLANG_IMAGE"
+python -m pip install -U eagle-harness==0.1.1
 eagle-harness-check
 ```
 

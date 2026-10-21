@@ -77,7 +77,7 @@ jobs:
           df -h
           test -f "docker/$ENGINE.Dockerfile"
           . ./docs/release.env
-          test "$EAGLE_VERSION" = "${RELEASE_TAG#v}"
+          test "${EAGLE_HARNESS_VERSION:-$EAGLE_VERSION}" = "${RELEASE_TAG#v}"
           test "$EAGLE_CUDA_INDEX" = https://eagle-hq.github.io/EAGLE-4/whl/cu130/
           test "$EAGLE_ROCM_INDEX" = https://eagle-hq.github.io/EAGLE-4/whl/rocm/
           if [[ "$ENGINE" == sglang-rocm || "$ENGINE" == tokenspeed ]]; then

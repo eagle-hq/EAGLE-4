@@ -25,21 +25,24 @@ A loaded model, an admitted request cap or a compiled kernel does not establish 
 - SGLang TP4 single-request and 32K-context optimization remain open. TP8 concurrency-8 prefill
   overhead and intermittent stalls remain unresolved. Repeated passes in one process are not
   independent server starts.
-- SGLang automatic high-load policy, fixed-chain improvements and sampled-tree improvements are not
-  qualified release defaults. High-load and Nemotron first divergences remain open. A release-engine cap-512
+- SGLang automatic high-load policy and high-load fixed-chain improvements are not qualified release defaults.
+  High-load and Nemotron first divergences remain open. A release-engine cap-512
   startup and request smoke passed, but it did not establish high-load acceleration or concurrent correctness.
-- SGLang native-OFF needs the engine's per-variant native-decode graphs. The 0.1.0 SGLang CUDA engine lacks
+- SGLang native-OFF, including OFF forced by a cost profile, needs the engine's per-variant forward-mode
+  decode graphs (the `forward_mode` field of the decode graph variant). The 0.1.0 SGLang CUDA engine lacks
   them, so EAGLE-4 refuses native-OFF on that engine.
+- The SGLang temperature-1 sampled tree (draft proposals drawn in one fused launch and verified against their
+  recorded probabilities) needs the engine's `sampling_step` verify hook. The 0.1.0 SGLang engines lack it, so
+  on them temperature-1 requests keep the 0.1.0 behaviour: a greedy draft verified by the target's sampler.
+  On every engine, a batch uses that path when any request has another temperature, a grammar or a penalty.
 - The shipped vLLM TP4 rounds schedule improves the measured concurrency-64 and concurrency-128 cases at a
   running cap of 64, at temperature 0 and 1; see the
   [support matrix](support-matrix.md#measured-high-load-tree-schedule). The schedule has no TP1/TP8 profile.
   A running cap of 128 and higher concurrency are not qualified. Native-OFF is disabled by default and does
   not reach native-decode throughput in the measured TP1 cases.
-- vLLM can drop EAGLE-4 INFO messages during plugin registration. An absent schedule-load line is
-  not proof that the schedule is inactive. See [troubleshooting](troubleshooting.md#slower-than-expected).
 - AMD measurements apply to the MI355X TP1 Qwen3.8 profile. At concurrency 64 on one MI355X, a short
-  diagnostic measured EAGLE-4 at 2703.6 tokens/s against 2975.4 tokens/s for no-spec decoding, so
-  speculation is slower there. HIP side-stream prelaunch stays disabled: its replay check now passes, but it
+  diagnostic on the release stack measured EAGLE-4 at 2703.6 tokens/s against 2975.4 tokens/s for no-spec
+  decoding, so speculation is slower than no-spec there. HIP side-stream prelaunch stays disabled: its replay check now passes, but it
   measured no throughput gain on MI355X. Remaining target, draft and verify phase overheads are separate
   from the measured-profile throughput results.
 

@@ -4,17 +4,18 @@ owner: eagle-harness
 last_verified: 2026-10-20
 ---
 
-# Install EAGLE-4 0.1.0
+# Install EAGLE-4 0.1.1
 
 Use one patched engine per environment. Every path installs from public package indexes:
-`eagle-harness==0.1.0` from PyPI and the patched engine from the EAGLE-4 wheel index.
+`eagle-harness==0.1.1` from PyPI and the patched engine from the EAGLE-4 wheel index.
 Stock engine packages do not provide the required plugin hooks. Choose the pip or Docker path below,
 then follow that engine's quickstart.
 
 ## Release locations and availability
 
 [Release settings](release.env) is the single source for package pins, wheel indexes and container tags.
-The engine wheels belong to the GitHub release named by `EAGLE_RELEASE_ASSETS`. Its PEP 503 indexes
+The engine wheels belong to the GitHub release named by `EAGLE_RELEASE_ASSETS` (v0.1.0: the engines did not
+change in 0.1.1). Its PEP 503 indexes
 separate CUDA and ROCm wheels. The `eagle-harness` wheels and source distribution are published only to PyPI,
 not to the GitHub Release. Publishing the public release runs `publish.yml` with PyPI trusted publishing.
 
@@ -67,19 +68,21 @@ python -m pip install --upgrade pip
 python -m pip install --extra-index-url "$EAGLE_CUDA_INDEX" \
   --extra-index-url "$EAGLE_TORCH_CUDA_INDEX" --extra-index-url "$EAGLE_NVIDIA_INDEX" \
   "sglang==$EAGLE_SGLANG_VERSION" 'flashinfer-python>=0.7.2'
-python -m pip install "eagle-harness==$EAGLE_VERSION"
+python -m pip install "eagle-harness==$EAGLE_HARNESS_VERSION"
 eagle-harness-check
 ```
 
 The NVIDIA index supplies the pinned `cuda-tile==1.6.0rc5` wheel. It avoids relying on a source build
 from PyPI. The private install check also succeeded with that exact dependency built from its PyPI source.
 
-After the image is published and qualified, open it and check the hooks:
+Or open the published image and check the hooks. The 0.1.0 images carry `eagle-harness` 0.1.0; upgrade it
+inside the container:
 
 ```bash
 docker run --rm --gpus all --ipc host -it \
   -p 127.0.0.1:30000:30000 -v "$PWD/models:/models:ro" \
   --entrypoint bash "$EAGLE_SGLANG_IMAGE"
+python -m pip install -U eagle-harness==0.1.1
 eagle-harness-check
 ```
 
@@ -171,18 +174,19 @@ source .venv-vllm/bin/activate
 python -m pip install --upgrade pip
 python -m pip install --extra-index-url "$EAGLE_CUDA_INDEX" \
   --extra-index-url "$EAGLE_TORCH_CUDA_INDEX" "vllm==$EAGLE_VLLM_VERSION"
-python -m pip install "eagle-harness==$EAGLE_VERSION"
+python -m pip install "eagle-harness==$EAGLE_HARNESS_VERSION"
 eagle-harness-check
 ```
 
-The vLLM image has been built, but its serving and correctness checks are pending. After qualification
-and publication, mount a writable directory for the calibration output:
+Or use the published vLLM image, which passed serving and correctness checks. It carries `eagle-harness` 0.1.0;
+upgrade it inside the container. Mount a writable directory for the calibration output:
 
 ```bash
 mkdir -p calibration
 docker run --rm --gpus all --ipc host -it \
   -p 127.0.0.1:8000:8000 -v "$PWD/models:/models:ro" \
   -v "$PWD/calibration:/calibration" --entrypoint bash "$EAGLE_VLLM_IMAGE"
+python -m pip install -U eagle-harness==0.1.1
 eagle-harness-check
 ```
 
@@ -207,16 +211,18 @@ python -m pip install --upgrade pip
 python -m pip install --extra-index-url "$EAGLE_CUDA_INDEX" \
   --extra-index-url "$EAGLE_TORCH_CUDA_INDEX" \
   "tokenspeed==$EAGLE_TOKENSPEED_VERSION" $EAGLE_TOKENSPEED_AUX_REQUIREMENTS
-python -m pip install "eagle-harness==$EAGLE_VERSION"
+python -m pip install "eagle-harness==$EAGLE_HARNESS_VERSION"
 eagle-harness-check
 ```
 
-Or use the published TokenSpeed image, which passed a GPU check in serve mode:
+Or use the published TokenSpeed image, which passed a GPU check in serve mode. It carries `eagle-harness` 0.1.0;
+upgrade it inside the container:
 
 ```bash
 docker run --rm --gpus all --ipc host -it \
   -p 127.0.0.1:30000:30000 -v "$PWD/models:/models:ro" \
   --entrypoint bash "$EAGLE_TOKENSPEED_IMAGE"
+python -m pip install -U eagle-harness==0.1.1
 eagle-harness-check
 ```
 
