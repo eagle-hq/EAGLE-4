@@ -49,15 +49,16 @@
 
 ## EAGLE-4
 
-EAGLE-4 (Extrapolation Algorithm for Greater Language-model Efficiency) speeds up LLM inference with speculative
-decoding. One draft model adapts its draft tree to the batch size, the hardware and the workload, and keeps the
-target model's output distribution. On four B300 GPUs it serves Qwen3.8-27B 3.42× faster than SGLang without
-speculation for one request at a time.
+**Leave speculation on. EAGLE-4 adapts to your hardware, batch and workload.**
 
-This repository is `eagle-harness`, the package that runs EAGLE-4 drafts inside SGLang, vLLM and TokenSpeed.
+EAGLE-4 (Extrapolation Algorithm for Greater Language-model Efficiency) speeds up LLM inference with
+speculative decoding. EAGLE-4 draft models are built to run with `eagle-harness`, which decides how far to
+speculate from measured costs on your setup, so every draft tree fits the batch size, the hardware and the
+workload. The output stays exactly what the target model would generate on its own: up to 3.4× faster
+generation on Qwen3.8-27B, with the same answers. [Measured speedups](#measured-speedup)
 
-**Note that an EAGLE-4 draft model is only one component of EAGLE-4 and does not represent the complete system
-on its own. It must be combined with EAGLE-Harness to form the full EAGLE-4 system.**
+This repository holds `eagle-harness`, the package that brings EAGLE-4 to SGLang, vLLM and TokenSpeed.
+Install it, point your engine at an EAGLE-4 draft model, and it serves with EAGLE-4.
 
 ## Quick start
 
