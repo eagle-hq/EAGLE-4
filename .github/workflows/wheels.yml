@@ -5,6 +5,10 @@
 #
 # The binary wheel carries the native candidate-head library prebuilt for CUDA 12.9 and 13.0
 # (eagle_harness/kernels/build.py), so `pip install` needs no nvcc; the sdist and the pure wheel build it on first use.
+#
+# Runner: GitHub-hosted, except in a private source repo, which builds on its self-hosted CPU runners (repo variable
+# CI_HEAVY_RUNNER, a JSON label list; '"ubuntu-24.04"' switches back). Pull-request builds are checks only and upload
+# nothing.
 name: wheels
 
 on:
@@ -56,31 +60,58 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: >-
+      ${{ github.event.repository.private && fromJSON(vars.CI_HEAVY_RUNNER || '["self-hosted", "eagle-ci"]')
+      || 'ubuntu-24.04' }}
     timeout-minutes: 30
+    concurrency:
+      group: wheels-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        if: runner.environment == 'github-hosted'
         with:
           python-version: "3.12"
+      - name: Build tools (a self-hosted runner keeps their venv, on the node's Python 3.12)
+        run: |
+          venv="${EAGLE_CI_CACHE:-$RUNNER_TEMP}/wheel-tools"
+          if [ ! -x "$venv/bin/python" ]; then
+            mkdir -p "${venv%/*}"
+            tmp=$(mktemp -d "$venv.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
+            python3.12 -m venv "$tmp"
+            "$tmp/bin/python" -m pip install -q build auditwheel patchelf twine
+            mv -T "$tmp" "$venv" 2>/dev/null || echo "another job built $venv first"
+          fi
+          echo "$venv/bin" >> "$GITHUB_PATH"
       - name: CUDA 12.9 and 13.0 compilers (nvcc and the static runtime only)
+        if: runner.environment == 'github-hosted'
         run: |
           curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends \
             cuda-nvcc-12-9 cuda-cudart-dev-12-9 cuda-nvcc-13-0 cuda-cudart-dev-13-0
-      - run: python -m pip install build auditwheel patchelf twine
-      - run: bash tools/build_wheel.sh . dist /usr/local/cuda-12.9 /usr/local/cuda-13.0
+          echo "CUDA_12=/usr/local/cuda-12.9" >> "$GITHUB_ENV"
+          echo "CUDA_13=/usr/local/cuda-13.0" >> "$GITHUB_ENV"
+      - name: CUDA 12.9 and 13.0 compilers from NVIDIA's archives (self-hosted, no root, kept in the tool cache)
+        if: runner.environment != 'github-hosted'
+        run: |
+          python tools/cuda_redist.py 12.9.1 "${EAGLE_CI_CACHE:-$RUNNER_TOOL_CACHE}/cuda-redist/12.9.1"
+          python tools/cuda_redist.py 13.0.2 "${EAGLE_CI_CACHE:-$RUNNER_TOOL_CACHE}/cuda-redist/13.0.2"
+          echo "CUDA_12=${EAGLE_CI_CACHE:-$RUNNER_TOOL_CACHE}/cuda-redist/12.9.1" >> "$GITHUB_ENV"
+          echo "CUDA_13=${EAGLE_CI_CACHE:-$RUNNER_TOOL_CACHE}/cuda-redist/13.0.2" >> "$GITHUB_ENV"
+      - run: bash tools/build_wheel.sh . dist "$CUDA_12" "$CUDA_13"
       - name: Build log (toolkits, glibc symbols, wheel contents)
         if: always()
         run: cat dist/build.txt || true
       - run: python -m twine check --strict dist/*.tar.gz dist/*.whl dist/pure/*.whl
       - run: python tools/check_dist.py dist
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dist
           path: dist
