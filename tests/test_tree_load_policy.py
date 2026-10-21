@@ -38,7 +38,7 @@ RELEASE = [
 def _rounds(rows):
     out = {}
     for r in rows:
-        out.setdefault(r["batch_size"], {})[r["width"]] = (r["round_us"], r["accept"])
+        out.setdefault(r["batch_size"], {})[r["width"]] = (r["round_us"], r["accept"], r["count"])
     return out
 
 
@@ -65,6 +65,29 @@ def test_low_batch_keeps_the_configured_width_and_high_batch_narrows():
     assert width_at(schedule, 64) == 4
     assert width_at(schedule, 512) == 4
     assert schedule[0][0] == 1 and schedule[-1][1] == 512
+
+
+def test_a_few_rounds_of_a_drained_batch_do_not_move_the_low_batch_width():
+    """TP1 calibration shape: the tails of two passes leave a few rounds at batch sizes 2-7 where the remaining requests
+    differ between the servers. Thousands of rounds at batch 8 say 16 wins there; the switch stays above it."""
+    rows = [
+        _row(1, 16, 14_218, 9.91, 63), _row(1, 4, 11_611, 3.35, 163),
+        _row(2, 16, 12_000, 2.11, 21), _row(2, 4, 12_125, 2.30, 21),
+        _row(6, 16, 19_888, 2.96, 99), _row(6, 4, 15_727, 2.52, 77),
+        _row(7, 16, 22_581, 3.17, 31), _row(7, 4, 17_605, 2.73, 70),
+        _row(8, 16, 23_073, 4.51, 1654), _row(8, 4, 16_550, 2.81, 2834),
+        _row(20, 16, 39_769, 3.75, 53), _row(20, 4, 19_500, 2.50, 40),
+        _row(42, 16, 70_849, 4.12, 212),
+        _row(43, 16, 72_997, 4.34, 247), _row(43, 4, 27_000, 2.70, 30),
+    ]
+    assert served_tree_schedule(_rounds(rows), 16, 512) == [(1, 19, 16), (20, 512, 4)]
+
+
+def test_narrowing_never_widens_at_a_larger_batch():
+    rows = RELEASE + [_row(256, 16, 150_000, 3.9), _row(256, 4, 40_000, 2.8), _row(256, 2, 25_000, 1.9)]
+    rows += [_row(512, 16, 300_000, 3.9), _row(512, 4, 70_000, 2.8), _row(512, 2, 60_000, 1.9)]
+    schedule = served_tree_schedule(_rounds(rows), 16, 512)
+    assert (width_at(schedule, 64), width_at(schedule, 256), width_at(schedule, 512)) == (4, 2, 2)
 
 
 def test_batch_sizes_below_the_first_loss_keep_the_configured_width():
@@ -96,7 +119,7 @@ def test_merge_keeps_other_widths_and_replaces_measured_cells(tmp_path):
     merge_tree_rounds(str(tmp_path), [_row(8, 16, 12_000, 4.4), _row(64, 16, 48_000, 3.9)])
     merge_tree_rounds(str(tmp_path), [_row(64, 16, 47_900, 3.96), _row(64, 4, 20_000, 2.9)])
     rounds = load_tree_rounds(str(tmp_path))
-    assert rounds == {8: {16: (12_000.0, 4.4)}, 64: {16: (47_900.0, 3.96), 4: (20_000.0, 2.9)}}
+    assert rounds == {8: {16: (12_000.0, 4.4, 50)}, 64: {16: (47_900.0, 3.96, 50), 4: (20_000.0, 2.9, 50)}}
     data = json.loads((tmp_path / TREE_ROUNDS_FILE).read_text())
     assert sorted((r["batch_size"], r["width"]) for r in data["rounds"]) == [(8, 16), (64, 4), (64, 16)]
 

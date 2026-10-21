@@ -290,7 +290,7 @@ class HarnessSpeculator(EagleSpeculator):
         count = self.num_speculative_steps if num_speculative_tokens is None else num_speculative_tokens
         num_reqs = input_batch.num_reqs
         if self.recorder is not None and not dummy_run:
-            self.recorder.round(num_reqs, count, bool(input_batch.has_prefill), num_sampled)
+            self.recorder.round(num_reqs, count, bool(input_batch.has_prefill), num_sampled, input_batch.cu_num_logits)
         if not dummy_run and self.sampled_tokens is not None:
             # Rows in path order: the draft prefill then sees the accepted chain, a prefix of the rows.
             self.src_rows.copy_(self.rows)  # rows that are not a verified tree keep their place

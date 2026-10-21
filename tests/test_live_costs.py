@@ -161,7 +161,7 @@ def test_every_calibration_reader_refuses_another_setup(tmp_path):
     chain = SimpleNamespace(method_config={"intensity": "chain_intensity", "data_path": data_path})
     tree = SimpleNamespace(method_config={"mode": "static", "max_verify_width": 16, "data_path": data_path})
     assert chain_widths(data_path, 4, 8, key=b300) == [(1, 8, 4)]
-    assert load_tree_rounds(data_path, b300) == {64: {16: (48000.0, 4.0)}}
+    assert load_tree_rounds(data_path, b300) == {64: {16: (48000.0, 4.0, 10)}}
     check_data_key(chain, b300)
     check_data_key(tree, b300)
     for read in (

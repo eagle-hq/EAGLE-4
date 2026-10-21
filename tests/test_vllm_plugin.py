@@ -312,6 +312,33 @@ def test_measured_tree_rounds_narrow_only_the_losing_batch_sizes(registered, tmp
     assert plain.num_speculative_tokens_per_batch_size is None
 
 
+def test_measured_tree_rounds_cap_the_serve_mode_buckets(registered, tmp_path):
+    from eagle_harness.core.chain_width import merge_tree_rounds
+
+    def row(bs, width, round_us, accept):
+        return {"batch_size": bs, "width": width, "round_us": round_us, "accept": accept, "count": 50}
+
+    tree = {"mode": "serve", "node_top_k": 4, "tree_depth": 14, "max_verify_width": 16, "data_path": str(tmp_path)}
+    unmeasured = SpeculativeConfig(method=METHOD_NAME, method_config=tree).num_speculative_tokens_per_batch_size
+    merge_tree_rounds(
+        str(tmp_path),
+        [row(8, 16, 12_500, 4.43), row(8, 4, 9_000, 2.9), row(64, 16, 47_900, 3.96), row(64, 4, 20_000, 2.9)],
+    )
+    config = SpeculativeConfig(method=METHOD_NAME, method_config=tree)
+    schedule = config.num_speculative_tokens_per_batch_size
+    assert validate_and_normalize_dynamic_sd_schedule(schedule) == schedule
+
+    def k_at(entries, bs):
+        return next(k for first, last, k in entries if first <= bs <= last)
+
+    # Below the first measured loss (batch 64) the buckets stand; from there width 4 caps them.
+    for bs in (1, 2, 8, 16, 63):
+        assert k_at(schedule, bs) == k_at(unmeasured, bs)
+    assert {k_at(schedule, bs) for bs in (64, 128, 512)} == {3}
+    assert {k_at(unmeasured, bs) for bs in (64, 128, 512)} != {3}
+    assert config.num_speculative_tokens == max(k for _, _, k in schedule)
+
+
 def test_record_rounds_needs_a_data_path():
     assert parse_method_config({"mode": "static", "record_rounds": True, "data_path": "/x"}).record_rounds is True
     assert parse_method_config({"mode": "static"}).record_rounds is False

@@ -39,6 +39,7 @@ starting a separate engine. The width of batch size ``B`` is then
 from __future__ import annotations
 
 import json
+import math
 import os
 import statistics
 from dataclasses import dataclass
@@ -271,7 +272,8 @@ def _ranges(widths: Mapping[int, int], max_batch_size: int) -> List[Tuple[int, i
 #     {"rounds": [{"batch_size": 64, "width": 16, "round_us": 47900.0, "accept": 3.96, "count": 200}, ...]}
 #
 # per batch size and verify width: the median period between consecutive decode rounds and the mean tokens a request
-# committed per round (``accept``: 1 + accepted drafts). Width 1 verifies only the root (no drafts). Unlike the chain's
+# committed per round it verified drafts in, rounds that also prefill included (``accept``: 1 + accepted drafts, as
+# vLLM's spec-decode counters report it). Width 1 verifies only the root (no drafts). Unlike the chain's
 # acceptance profile, the tree's acceptance is measured per width, since the best ``width`` nodes of a tree are not a
 # prefix of a chain.
 
@@ -286,8 +288,8 @@ def _check_tree_row(row: Mapping[str, float]) -> None:
 
 def load_tree_rounds(
     data_path: str, key: Optional[CostKey] = None
-) -> Optional[Dict[int, Dict[int, Tuple[float, float]]]]:
-    """``{batch size: {width: (round us, accept)}}`` from ``<data_path>/rounds/tree.json``, None if not measured.
+) -> Optional[Dict[int, Dict[int, Tuple[float, float, int]]]]:
+    """``{batch size: {width: (round us, accept, rounds)}}`` from ``<data_path>/rounds/tree.json``, None if not measured.
     With the server's ``key``, rounds measured on another setup are refused (as by :func:`chain_widths`)."""
     try:
         with open(os.path.join(data_path, TREE_ROUNDS_FILE), encoding="utf-8") as f:
@@ -296,10 +298,10 @@ def load_tree_rounds(
         return None
     if key is not None:
         check_key(data_path, key)
-    rounds: Dict[int, Dict[int, Tuple[float, float]]] = {}
+    rounds: Dict[int, Dict[int, Tuple[float, float, int]]] = {}
     for row in rows:
         _check_tree_row(row)
-        cell = (float(row["round_us"]), float(row["accept"]))
+        cell = (float(row["round_us"]), float(row["accept"]), int(row["count"]))
         rounds.setdefault(int(row["batch_size"]), {})[int(row["width"])] = cell
     return rounds
 
@@ -328,30 +330,39 @@ def merge_tree_rounds(data_path: str, rows: Sequence[Mapping[str, float]]) -> st
 
 
 def served_tree_schedule(
-    rounds: Mapping[int, Mapping[int, Tuple[float, float]]], width: int, max_batch_size: int
+    rounds: Mapping[int, Mapping[int, Tuple[float, float, int]]], width: int, max_batch_size: int
 ) -> Optional[List[Tuple[int, int, int]]]:
     """``(first, last, verify width)`` ranges over ``1..max_batch_size`` for a tree configured ``width`` wide.
 
-    At each measured batch size that timed ``width``, the measured width up to ``width`` with the most tokens per unit
-    of time (``accept / round_us``; ties keep the wider). Every batch size below the first measured one where another
-    width wins keeps ``width``, so the low-batch behavior never changes; from there each batch size takes the choice of
-    the nearest measured one (ties go to the larger). None when no measured batch size beats ``width``: the tree then
-    keeps one width, as without measurements.
+    A measured batch size that timed ``width`` and a narrower width compares them by tokens per unit of time
+    (``accept / round_us``): its choice is the narrower width with the highest rate (ties keep the wider), and its gain
+    is the log of that rate over ``width``'s, weighted by the fewer rounds of the two cells. A wider verify only gets
+    dearer relative to a narrower one as the batch grows, so the schedule keeps ``width`` below one switch batch size
+    and narrows from there: the switch is the compared batch size whose gain summed with every larger one's is the
+    largest (ties go to the larger switch). A few rounds of a nearly drained batch, whose remaining requests differ
+    between the calibration servers, then cannot move the low-batch width. From the switch each batch size takes the
+    choice of the nearest compared one (ties go to the larger), never wider than a smaller batch size's. None when no
+    switch gains: the tree then keeps one width, as without measurements.
     """
-    choices: Dict[int, int] = {}
+    compared: Dict[int, Tuple[int, float]] = {}  # batch size -> (narrower choice, weighted log gain)
     for bs, cells in rounds.items():
-        if width not in cells:
+        narrower = [(accept / us, w, count) for w, (us, accept, count) in cells.items() if w < width]
+        if width not in cells or not narrower:
             continue
-        best, best_rate = width, cells[width][1] / cells[width][0]
-        for w, (us, accept) in sorted(cells.items(), reverse=True):
-            if w <= width and accept / us > best_rate:
-                best, best_rate = w, accept / us
-        choices[bs] = best
-    losing = [bs for bs, best in choices.items() if best != width]
-    if not losing:
+        us, accept, count = cells[width]
+        rate, best, best_count = max(narrower)
+        compared[bs] = (best, min(count, best_count) * math.log(rate * us / accept))
+    switch, total, best_total = None, 0.0, 0.0
+    for bs in sorted(compared, reverse=True):
+        total += compared[bs][1]
+        if total > best_total:
+            switch, best_total = bs, total
+    if switch is None:
         return None
-    switch = min(losing)
-    ranges = _ranges({bs: w for bs, w in choices.items() if bs >= switch}, max_batch_size)
+    ranges = _ranges({bs: best for bs, (best, _) in compared.items() if bs >= switch}, max_batch_size)
     kept = [(1, switch - 1, width)] if switch > 1 else []
-    clipped = [(max(first, switch), last, w) for first, last, w in ranges if last >= switch]
-    return merge_ranges(kept + clipped)
+    narrowed: List[Tuple[int, int, int]] = []
+    for first, last, w in ranges:
+        if last >= switch:
+            narrowed.append((max(first, switch), last, min(w, narrowed[-1][2]) if narrowed else w))
+    return merge_ranges(kept + narrowed)

@@ -25,7 +25,8 @@ sglang takes from its own server arguments, and one of the vLLM tree drafter:
   ``<data_path>/rounds/tree.json`` (:mod:`eagle_harness.vllm.round_recorder`). A tree whose
   ``data_path`` holds those rounds verifies fewer rows from the first batch size where that
   measured faster (:func:`~eagle_harness.core.chain_width.served_tree_schedule`); smaller batches
-  keep ``max_verify_width``.
+  keep ``max_verify_width``. In the cost-model modes the measured width also caps each batch
+  size's verify bucket.
 
 Example::
 
@@ -51,6 +52,7 @@ from eagle_harness.core.chain_width import (
     load_tree_rounds,
     merge_ranges,
     served_tree_schedule,
+    width_at,
 )
 from eagle_harness.core.config import HarnessConfig, harness_config_from_dict
 from eagle_harness.core.limits import (
@@ -175,7 +177,22 @@ def _verify_widths(
         )
     if widths is None:
         widths = [(bs, bs, min(max(verify_buckets(bs, intensity)), max_verify_width)) for bs in cost_batch_sizes(limit)]
+        measured = None if chain else measured_tree_widths(data_path, max_verify_width, limit, key)
+        if measured is not None:
+            widths = _narrowest(widths, measured)
     return widths
+
+
+def _narrowest(widths: List[Tuple[int, int, int]], measured: List[Tuple[int, int, int]]) -> List[Tuple[int, int, int]]:
+    """Per batch size, the narrower of two schedules: ``widths`` per calibrated batch size (each covers the batch sizes
+    after the previous one) and ``measured`` ranges."""
+    firsts = [1] + [last + 1 for _, last, _ in widths[:-1]]
+    buckets = [(first, last, width) for first, (_, last, width) in zip(firsts, widths)]
+    cuts = sorted({first for first, _, _ in buckets} | {first for first, _, _ in measured if first <= widths[-1][1]})
+    ends = [cut - 1 for cut in cuts[1:]] + [widths[-1][1]]
+    return merge_ranges(
+        (first, last, min(width_at(buckets, first), width_at(measured, first))) for first, last in zip(cuts, ends)
+    )
 
 
 def _draft_token_schedule(widths: List[Tuple[int, int, int]], limit: int) -> List[Tuple[int, int, int]]:
@@ -292,19 +309,26 @@ def native_decode_ranges(spec_config: Any) -> List[Tuple[int, int]]:
 
 def measured_tree_schedule(parsed: VllmMethodConfig, key: CostKey | None = None) -> List[Tuple[int, int, int]] | None:
     """The static tree's draft-count schedule from served rounds under ``data_path`` (None: one width throughout)."""
-    data_path = parsed.harness.data_path
+    limit = max_batch_size(parsed.harness.intensity)
+    widths = measured_tree_widths(parsed.harness.data_path, parsed.max_verify_width, limit, key)
+    return None if widths is None else _draft_token_schedule(widths, limit)
+
+
+def measured_tree_widths(
+    data_path: str | None, max_verify_width: int, limit: int, key: CostKey | None = None
+) -> List[Tuple[int, int, int]] | None:
+    """The tree's verify width ranges from served rounds under ``data_path`` (None: one width throughout)."""
     rounds = load_tree_rounds(data_path, key) if data_path else None
     if not rounds:
         return None
-    limit = max_batch_size(parsed.harness.intensity)
-    widths = served_tree_schedule(rounds, parsed.max_verify_width, limit)
+    widths = served_tree_schedule(rounds, max_verify_width, limit)
     if widths is None:
         return None
     path = os.path.join(data_path, TREE_ROUNDS_FILE)
     with open(path, "rb") as f:
         digest = hashlib.sha256(f.read()).hexdigest()
     logger.info("eagle_harness: tree verify width per batch size from %s (sha256 %s): %s", path, digest, widths)
-    return _draft_token_schedule(widths, limit)
+    return widths
 
 
 def check_data_key(spec_config: Any, key: CostKey) -> None:

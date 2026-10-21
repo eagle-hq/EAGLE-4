@@ -82,11 +82,13 @@ vLLM takes these extra keys in `method_config`:
 | `node_top_k` | integer | `8` (trees), `1` (chains) | Frontier nodes expanded per draft step. `1` uses vLLM's own EAGLE chain loop. |
 | `tree_depth` | integer | `12` (trees), `15` (chains) | Maximum draft depth. It sizes the draft's KV lookahead. |
 | `depth_stop_gain` | `"derived"`, number or `null` | `"derived"` | What one more draft step must add to the expected accepted length. `"derived"`: the step's measured cost from the cost tables under `data_path`, or a startup error in automatic serving when a scheduled shape is unpriced. Static mode retains a lossless stop. A number sets a fixed gain. `0` stops only when no deeper node can enter the verify set. `null` always drafts `tree_depth` steps. |
+| `record_rounds` | boolean | `false` | Trees: time the served decode rounds and merge them into `<data_path>/rounds/tree.json`, per batch size and verify width: the median round period and the mean tokens committed per request-round, as vLLM's spec-decode counters report it (rounds that also prefill included). Needs `data_path`. Serve the workload once per candidate `max_verify_width`; each server keeps the other widths' rows. |
 
 In `serve` mode vLLM fixes the verify width per batch size (`num_speculative_tokens_per_batch_size`).
 Automatic trees require cost tables for every scheduled shape; set `depth_stop_gain` explicitly to opt out.
 Automatic chains require timings and an acceptance profile; an explicit `max_verify_width` or batch schedule opts into unpriced operation.
-Trees get the widest graph width of their cost buckets. A chain (`node_top_k` 1) verifies exactly its width, so the
+Trees get the widest graph width of their cost buckets, capped from the first batch size where
+`<data_path>/rounds/tree.json` measured a narrower verify faster (as in static mode). A chain (`node_top_k` 1) verifies exactly its width, so the
 width of each batch size is derived from the cost tables and the chain acceptance profile under `data_path`
 (`<data_path>/accept/chain.json`): the width with the most expected tokens per unit of time, `1` (no speculation) when
 no chain pays. Without a profile startup fails, unless `max_verify_width` or a batch schedule is explicitly supplied. See
