@@ -31,6 +31,7 @@ def _extend():
     began = []
     steps = SimpleNamespace(
         tree=tree,
+        sampled=None,
         seq_lens=torch.zeros(MAX_BS, dtype=torch.long),
         req_pool_indices=torch.zeros(MAX_BS, dtype=torch.long),
         begin_body=began.append,

@@ -62,7 +62,7 @@ from eagle_harness.models.eagle4_structure import (
 )
 from eagle_harness.models.low_rank_head import low_rank_scores
 from eagle_harness.models.low_rank_head import low_rank_factors
-from eagle_harness.kernels.candidate_ops import candidate_topk
+from eagle_harness.kernels.candidate_ops import candidate_head
 from eagle_harness.sglang.algorithm import harness_config
 from eagle_harness.sglang.candidate_logits import (
     Candidates,
@@ -364,6 +364,15 @@ class LlamaForCausalLMEagle4(LlamaForCausalLM):
         gather = tensor_model_parallel_all_gather if self._tp_size > 1 else None
         return merge_candidates(local, self.num_candidates, gather)
 
+    def proposal_candidates(self, hidden: torch.Tensor) -> Candidates:
+        """The complete sparse distribution the sampled draft draws from (``[rows, C]`` fp32 logits, int64 ids); on
+        CUDA the greedy path's candidate pipeline without its top-k, so a sampled step costs the greedy step's
+        collectives."""
+        if not hidden.is_cuda:
+            return self._candidates(hidden)
+        logits, tokens, _ = self._candidate_head(hidden, 0)
+        return Candidates(logits, tokens)
+
     def candidate_topk(self, hidden: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Top-``k`` next tokens of each row: ``([rows, k]`` fp32 probabilities, ``[rows, k]`` ids).
 
@@ -371,13 +380,13 @@ class LlamaForCausalLMEagle4(LlamaForCausalLM):
         full-vocab softmax of :class:`CandidateLogitsProcessor`'s rows.
         """
         if hidden.is_cuda:
-            return self._fused_candidate_topk(hidden, k)
+            return self._candidate_head(hidden, k)[2]
         candidates = self._candidates(hidden)
         probs, pick = torch.topk(torch.softmax(candidates.logits, dim=-1), k, dim=-1)
         return probs, torch.gather(candidates.token_ids, 1, pick)
 
-    def _fused_candidate_topk(self, hidden: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """:meth:`candidate_topk` on the candidate kernels (``candidate_ops.candidate_topk``), bit-identical to torch."""
+    def _candidate_head(self, hidden: torch.Tensor, k: int):
+        """``candidate_ops.candidate_head`` on this head's shard (bit-identical to torch): logits, ids, top-``k``."""
         shard = self.lm_head.shard_indices
         scores = low_rank_scores(
             hidden,
@@ -385,7 +394,7 @@ class LlamaForCausalLMEagle4(LlamaForCausalLM):
             self.efficient_lm_head.weight,
             shard.org_vocab_end_index - shard.org_vocab_start_index,
         )
-        return candidate_topk(
+        return candidate_head(
             scores,
             self.lm_head.weight,
             hidden,

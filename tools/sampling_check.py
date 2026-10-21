@@ -46,8 +46,6 @@ import sys
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
-import requests
-
 PROMPTS = (
     "Here is a list of ten random animals:",
     "Once upon a time, in a",
@@ -55,6 +53,7 @@ PROMPTS = (
     "The weather today is",
 )
 SETTINGS: Dict[str, dict] = {
+    "unrestricted": {"temperature": 1.0, "top_p": 1.0, "top_k": -1},
     "temperature": {"temperature": 0.7},
     "top_k_top_p": {"temperature": 1.0, "top_k": 8, "top_p": 0.7},
     "min_p": {"temperature": 1.0, "min_p": 0.05},
@@ -67,6 +66,7 @@ POOL = 10  # cells seen fewer times than this in both runs together are pooled
 
 def generate(api: str, base: str, model: Optional[str], prompt: List[int], params: dict, max_new: int, seed=None):
     """One completion's output token ids (and sglang's ``spec_*`` meta info)."""
+    import requests  # only the HTTP client needs it; compare runs in test envs without it
     if api == "sglang":
         sp = {"max_new_tokens": max_new, "ignore_eos": True, **params}
         if seed is not None:
@@ -86,6 +86,7 @@ def generate(api: str, base: str, model: Optional[str], prompt: List[int], param
 
 def vllm_spec_counters(base: str) -> Dict[str, float]:
     """vLLM's speculative decoding counters (drafts, accepted tokens), from /metrics."""
+    import requests
     counters: Dict[str, float] = collections.defaultdict(float)
     for line in requests.get(f"{base}/metrics", timeout=60).text.splitlines():
         if line.startswith("vllm:spec_decode_num_") and "_total" in line.split("{")[0]:
@@ -94,13 +95,22 @@ def vllm_spec_counters(base: str) -> Dict[str, float]:
 
 
 def run(args) -> int:
+    import requests
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     base = f"http://127.0.0.1:{args.port}"
     model = requests.get(f"{base}/v1/models", timeout=60).json()["data"][0]["id"] if args.api == "vllm" else None
     prompts = [tokenizer.encode(p, add_special_tokens=False) for p in PROMPTS]
-    result: dict = {"api": args.api, "max_new_tokens": args.max_new_tokens, "settings": {}, "seeds": {}}
+    result: dict = {
+        "api": args.api,
+        "max_new_tokens": args.max_new_tokens,
+        "samples": args.samples,
+        "concurrency": args.concurrency,
+        "prompt_ids": prompts,
+        "settings": {},
+        "seeds": {},
+    }
     pool = concurrent.futures.ThreadPoolExecutor(args.concurrency)
     for name in args.settings.split(","):
         params = SETTINGS[name]
@@ -231,18 +241,45 @@ def homogeneity(ref: Sequence, test: Sequence) -> Tuple[float, float, int]:
     return chi2_sf(stat, len(cells) - 1), tv, len(cells)
 
 
+def validate_pair(ref: dict, cand: dict) -> None:
+    """Reject partial evidence before a statistical test can silently omit it."""
+    if not ref["settings"] or ref["settings"].keys() != cand["settings"].keys():
+        raise ValueError("reference and candidate must contain the same nonempty settings")
+    length = ref["max_new_tokens"]
+    if length < JOINT or cand["max_new_tokens"] != length:
+        raise ValueError("matched token lengths must cover the joint test")
+    if ref.get("prompt_ids") != cand.get("prompt_ids"):
+        raise ValueError("reference and candidate prompt token ids differ")
+    for name in ref["settings"]:
+        r, c = ref["settings"][name], cand["settings"][name]
+        if "refused" in r or "refused" in c:
+            raise ValueError(f"{name}: refused setting is not distribution evidence")
+        if r["params"] != c["params"]:
+            raise ValueError(f"{name}: sampling parameters differ")
+        if len(r["tokens"]) != len(PROMPTS) or len(c["tokens"]) != len(PROMPTS):
+            raise ValueError(f"{name}: missing prompt results")
+        for r_tokens, c_tokens in zip(r["tokens"], c["tokens"]):
+            if not r_tokens or len(r_tokens) != len(c_tokens):
+                raise ValueError(f"{name}: empty or unequal sample counts")
+            for artifact, tokens in ((ref, r_tokens), (cand, c_tokens)):
+                if len(tokens) != artifact.get("samples", len(tokens)):
+                    raise ValueError(f"{name}: sample count differs from the requested count")
+                if any(len(ids) != length for ids in tokens):
+                    raise ValueError(f"{name}: incomplete output token sequence")
+
+
 def compare(args) -> int:
     with open(args.reference, encoding="utf-8") as f:
         ref = json.load(f)
     with open(args.candidate, encoding="utf-8") as f:
         cand = json.load(f)
+    try:
+        validate_pair(ref, cand)
+    except (KeyError, TypeError, ValueError) as error:
+        print(f"INVALID distribution evidence: {error}")
+        return 1
     tests = []  # (setting, prompt, what, p, tv, cells)
     for name, entry in cand["settings"].items():
-        if "refused" in entry:
-            print(f"{name:12s} REFUSED by the server: {entry['refused']}")
-            continue
-        if name not in ref["settings"]:
-            continue
         for i, (r_tokens, c_tokens) in enumerate(zip(ref["settings"][name]["tokens"], entry["tokens"])):
             k = min(len(r_tokens[0]), len(c_tokens[0]))
             r_joint = [tuple(t[:JOINT]) for t in r_tokens]

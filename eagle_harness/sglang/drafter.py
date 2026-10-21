@@ -264,6 +264,7 @@ class DynamicDrafter:
         self._prelaunch_stream: Optional[torch.cuda.Stream] = None
         self.last_depth = 0
         self.last_width = 0
+        self._sampled_depth = tree.shape.max_depth
 
     # ----------------------------------------------------------------- policy
     def bucket(self, bs: int) -> int:
@@ -435,9 +436,14 @@ class DynamicDrafter:
             scores = ranking.scores[:verify_count]
             self._verify_scores.launch(scores)
             self._have_lagged = True
-            width = fit_width(
-                self._verify_width(policy, scores.tolist(), verify_count, bs, context, lagged=False), widths, nodes + 1
-            )
+            sampled = getattr(self.steps, "sampled", None)
+            if sampled is not None and sampled.active:
+                # No history: use the allowed budget, never inspect this round's draws to decide whether to verify them.
+                width = fit_width(verify_count, widths, nodes + 1)
+            else:
+                width = fit_width(
+                    self._verify_width(policy, scores.tolist(), verify_count, bs, context, lagged=False), widths, nodes + 1
+                )
             self.last_depth, self.last_width = depth, width
             if width == 1:
                 return self._trivial(batch)
@@ -499,7 +505,7 @@ class DynamicDrafter:
             verify_input.prepared_mrope_positions = (
                 verify_input.positions.to(torch.int64).flatten().unsqueeze(0).repeat(3, 1)
             )
-        harness_input = HarnessVerifyInput.from_eagle(verify_input)
+        harness_input = HarnessVerifyInput.from_eagle(verify_input, proposal_nodes=selection.top_scores_index)
         if bs == 1 and self._kv_indices is not None:
             harness_input.prepared_attn_args = build_attn_args(
                 self._req_to_token, req_pool_indices, seq_lens, width, self._kv_indices
@@ -533,7 +539,10 @@ class DynamicDrafter:
 
         def run() -> int:
             depth = 0
-            while depth < self.steps.max_step:
+            limit = self.steps.max_step
+            if getattr(self.steps, "sampled", None) is not None and self.steps.sampled.active:
+                limit = self._sampled_depth - 1
+            while depth < limit:
                 kind = policy.width_step(depth)
                 if kind is WidthStep.LAUNCH:
                     self._launch_deltas(depth)
@@ -548,6 +557,19 @@ class DynamicDrafter:
     def _grow(self, bs: int, depth: int, row: Optional[DraftCostRow], past: int, policy) -> int:
         """Decide at ``depth`` (its step already queued), then step and decide until the policy
         stops; returns the tree's depth levels."""
+        if getattr(self.steps, "sampled", None) is not None and self.steps.sampled.active:
+            planned = self._sampled_depth
+            next_depth = None
+            while True:
+                stop = self._decide(depth, bs, row, past, policy)
+                if stop and next_depth is None:
+                    next_depth = depth + 1
+                if depth >= planned - 1:
+                    break
+                depth += 1
+                self.steps.run(bs, depth)
+            self._sampled_depth = next_depth or min(planned + 2, self.tree.shape.max_depth)
+            return planned
         while not self._decide(depth, bs, row, past, policy):
             if depth == self.steps.max_step:
                 return self.tree.shape.max_depth

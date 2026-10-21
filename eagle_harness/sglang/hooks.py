@@ -147,6 +147,8 @@ HOOKS: tuple[Hook, ...] = (
         _RUN_VERIFY,
         CALL,
     ),
+    # T=1 recorded-q tree verification (worker.py); without it, temperature-1 rounds keep target-only verification.
+    Hook("sglang.srt.speculative.eagle_worker_common:run_eagle_verify", ("sampling_step",), CALL, optional=True),
     Hook("sglang.srt.speculative.eagle_worker_common:VerifyAcceptInput", _ACCEPT_INPUT, CALL),
     Hook("sglang.srt.speculative.eagle_worker_common:VerifyAcceptResult", _ACCEPT_RESULT, CALL),
     # The EAGLE V2 worker the cost-model worker extends (prefill, pools, backends stay sglang's).
@@ -223,7 +225,7 @@ def _problem(hook: Hook) -> str | None:
         return None if hook.optional else f"{hook.path} is missing"
     if hook.kind == OVERRIDE and found != hook.params:
         return f"{hook.path}{found} is not {hook.params}"
-    if hook.kind == CALL and not set(hook.params) <= set(found):
+    if hook.kind == CALL and not set(hook.params) <= set(found) and not hook.optional:
         return f"{hook.path}{found} lacks {tuple(p for p in hook.params if p not in found)}"
     return None
 

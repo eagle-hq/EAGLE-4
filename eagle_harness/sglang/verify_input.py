@@ -69,6 +69,8 @@ class HarnessVerifyInput(EagleVerifyInput):
 
     # A greedy round: the target returns the rows' argmax, not their logits.
     greedy_tokens_only: bool = False
+    # Raw draft node ids of the selected non-root rows, in verify-row order.
+    proposal_nodes: Optional[torch.Tensor] = dataclasses.field(default=None, repr=False)
     # The tail-mask attention of the batch-size-1 verify graphs (set on the inputs they are captured with).
     tail_mask: Optional["TreeTailMask"] = dataclasses.field(default=None, repr=False)
     # (kv_indices, kv_indptr, qo_indptr) of a one-request verify over untranslated KV ids, built with the rest

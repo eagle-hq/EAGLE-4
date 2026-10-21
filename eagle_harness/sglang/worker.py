@@ -36,6 +36,7 @@ next draft on a side stream before waiting for verify.
 from __future__ import annotations
 
 import contextlib
+from functools import partial
 import logging
 import os
 from typing import TYPE_CHECKING, Optional, Union
@@ -71,6 +72,7 @@ from eagle_harness.sglang.plain_decode import NativeDecode
 from eagle_harness.sglang.row_attention import DraftRowAttention
 from eagle_harness.sglang.verify_step import AcceptTailGraphs, fused_accept_step, fused_accept_supported
 from eagle_harness.sglang.verify_graphs import verify_widths
+from eagle_harness.sglang.hooks import parameter_names
 from eagle_harness.sglang.verify_input import HarnessVerifyInput
 
 if TYPE_CHECKING:
@@ -94,6 +96,12 @@ def cost_key(runner) -> CostKey:
         engine=f"sglang {sglang_version}",
         dtype=str(runner.dtype),
     )
+
+
+def _sampled_tree(worker):
+    """The draft's recorded-q sampled tree, or None: engines without sglang's verify sampler hook build none, and a
+    worker built without sglang's __init__ (or serving natively, OFF) may have no draft steps to ask."""
+    return getattr(getattr(getattr(worker, "_draft_worker", None), "steps", None), "sampled", None)
 
 
 class HarnessDraftWorker(EagleDraftWorker):
@@ -141,7 +149,10 @@ class HarnessDraftWorker(EagleDraftWorker):
             self.draft_runner, max_bs=max_bs, max_rows_per_request=max(self.topk, width), window=getattr(model, "window", model.get_attention_sliding_window_size())
         )
         self.draft_runner.draft_attn_backend = self.draft_attn_backend
-        self.steps = DraftSteps(self.draft_runner, self.tree, self.draft_attn_backend)
+        # The sampled tree needs sglang's verify tree-sampler hook; engines without it keep 0.1.0's T=1 path (greedy
+        # draft, target-only verify). Its draws are keyed by sglang's TP-synchronized seed: every rank draws alike.
+        sampled_seed = self.target_worker.random_seed if "sampling_step" in parameter_names(run_eagle_verify) else None
+        self.steps = DraftSteps(self.draft_runner, self.tree, self.draft_attn_backend, sampled_seed=sampled_seed)
         intensity = self._intensity
         self.extend = DraftExtend(
             self.draft_runner,
@@ -336,6 +347,10 @@ class EagleHarnessWorker(EAGLEWorkerV2):
         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
             self._drafter.cancel_prelaunch()
             rounds.interrupt()
+            sampled = _sampled_tree(self)
+            if sampled is not None:
+                # Prefilled requests start from sglang's deterministic top-k roots: no recorded proposal distribution.
+                sampled.invalidate(batch.req_pool_indices)
             return super().forward_batch_generation(batch, on_publish, grammar_barrier, pp_proxy_tensors)
         native_decode = self._native_decode.select(batch)
         if native_decode:
@@ -343,6 +358,23 @@ class EagleHarnessWorker(EAGLEWorkerV2):
             result = self._native_decode.run(batch, grammar_barrier)
             self._verified.record()
         else:
+            sampled = _sampled_tree(self)
+            if sampled is not None:
+                active = (
+                    self.topk > 1
+                    and not batch.forward_mode.is_idle()
+                    and not batch.sampling_info.is_all_greedy
+                    and all(req.sampling_params.temperature == 1.0 for req in batch.reqs)
+                    and not batch.has_grammar
+                    and batch.sampling_info.acc_additive_penalties is None
+                    and batch.sampling_info.acc_scaling_penalties is None
+                    and not batch.sampling_info.has_watermark_candidates
+                )
+                if active != sampled.active:
+                    self._drafter.cancel_prelaunch()
+                    sampled.root_valid.zero_()  # this round's roots were drafted without recorded proposals
+                    logger.debug("eagle-harness: sampled tree %s", "on" if active else "off")
+                sampled.active = active
             draft = self._draft_worker
             timer = self._drafter.timer
             if batch.forward_mode.is_idle():
@@ -410,6 +442,10 @@ class EagleHarnessWorker(EAGLEWorkerV2):
                 staged=(steps.seq_lens[:1], steps.req_pool_indices[:1]),
                 extend=self._draft_worker.extend,
             )
+        sampled = _sampled_tree(self)
+        hook = {}  # never passed to an engine without the hook (sampled is None there)
+        if sampled is not None and sampled.active and width > 1:
+            hook["sampling_step"] = partial(sampled.sample, batch.spec_info)
         result = run_eagle_verify(
             batch,
             target_worker=self.target_worker,
@@ -424,6 +460,7 @@ class EagleHarnessWorker(EAGLEWorkerV2):
             finalize_tree_path=True,
             grammar_barrier=grammar_barrier,
             accept_step=accept_step,
+            **hook,
         )
         if accept_step is not None and batch.enable_overlap:
             # The scheduler reads on a leaf stream; the next tail replay may overwrite its graph buffers.

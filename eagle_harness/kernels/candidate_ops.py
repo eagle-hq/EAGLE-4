@@ -197,8 +197,8 @@ def candidate_head(
     all_gather: Callable[[torch.Tensor], torch.Tensor] | None = None,
     cuda_kernels: bool = True,
     max_triton_elements: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-    """Candidate logits, ids and top-k probabilities for each row.
+) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
+    """Candidate logits, ids and top-k probabilities for each row (None for ``top_k == 0``).
 
     ``scores`` [rows, shard vocab] are this rank's low-rank scores (padding columns already masked), ``lm_head``
     [shard vocab, H] its exact weights. Shard top-k, exact re-scoring (:func:`gather_dot`), the candidate tail; under TP
@@ -219,10 +219,7 @@ def candidate_head(
     else:
         ranks = all_gather(gather_dot_packed(lm_head, local_ids, hidden, vocab_start))
         logits, tokens = ranks[..., :num_candidates].view(torch.float32), ranks[..., num_candidates:]
-    logits, tokens, ranked = candidate_tail(logits, tokens, rows, top_k, cuda_kernels=cuda_kernels)
-    if ranked is None:
-        raise ValueError("candidate_head requires top_k > 0")
-    return logits, tokens, ranked
+    return candidate_tail(logits, tokens, rows, top_k, cuda_kernels=cuda_kernels)
 
 
 def candidate_topk(

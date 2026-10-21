@@ -209,6 +209,36 @@ def make_worker(modules, monkeypatch, *, calibration=None, schedule=None, native
     return worker, calls, fence
 
 
+def test_sampled_tree_follows_the_batch_and_never_verifies_roots_drafted_without_it(modules, monkeypatch):
+    worker, _, _ = make_worker(modules, monkeypatch, native=False)
+    worker.topk = 4
+    invalidated = []
+    sampled = SimpleNamespace(active=False, root_valid=torch.ones(8, dtype=torch.bool), invalidate=invalidated.append)
+    worker._draft_worker.steps = SimpleNamespace(sampled=sampled)
+    monkeypatch.setattr(modules.base, "forward_batch_generation", lambda self, *args: "prefill", raising=False)
+
+    def batch(temperature, mode=Mode.DECODE):
+        out = make_batch(Request(), Request(), mode=mode)
+        for request in out.reqs:
+            request.sampling_params = SimpleNamespace(temperature=temperature)
+        out.has_grammar = False
+        out.sampling_info = SimpleNamespace(
+            is_all_greedy=False, acc_additive_penalties=None, acc_scaling_penalties=None, has_watermark_candidates=False
+        )
+        return out
+
+    worker.forward_batch_generation(batch(1.0))
+    assert sampled.active and not sampled.root_valid.any()  # the roots came from the greedy draft extend
+    sampled.root_valid.fill_(True)  # this round's sampled extend recorded the next roots
+    worker.forward_batch_generation(batch(1.0))
+    assert sampled.active and sampled.root_valid.all()
+    worker.forward_batch_generation(batch(0.7))
+    assert not sampled.active and not sampled.root_valid.any()
+    prefill = batch(1.0, mode=Mode.EXTEND)
+    assert worker.forward_batch_generation(prefill) == "prefill"
+    assert invalidated == [prefill.req_pool_indices]
+
+
 @pytest.mark.parametrize("overlap", [False, True])
 @pytest.mark.parametrize("calibrating", [False, True])
 def test_native_decode_orders_barrier_calibration_publication_and_wait(modules, monkeypatch, tmp_path, calibrating, overlap):

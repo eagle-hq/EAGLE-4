@@ -75,6 +75,7 @@ class DraftExtend:
         self.positions = torch.zeros(max_bs * width, dtype=i64, device=device)
         self.last = torch.zeros(max_bs, dtype=i64, device=device)  # each request's row of its last accepted token
         self._graphs: Dict[Tuple[int, int], torch.cuda.CUDAGraph] = {}
+        self._sampled_graphs: Dict[Tuple[int, int], torch.cuda.CUDAGraph] = {}
 
     def hidden_rows(self, rows: int) -> torch.Tensor:
         """The input hidden-state buffer of ``rows`` (= batch size x verify width) rows, to write in place."""
@@ -96,7 +97,9 @@ class DraftExtend:
     def run(self, bs: int, width: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run the staged round's extend, stage the next round and seed its tree; returns views
         ``(topk_p, topk_index, hidden)`` of ``[bs, ...]`` (valid until the next call)."""
-        graph = self._graphs.get((bs, width))
+        sampled = self.steps.sampled
+        graphs = self._sampled_graphs if sampled is not None and sampled.active else self._graphs
+        graph = graphs.get((bs, width))
         if graph is not None:
             graph.replay()
         else:
@@ -108,6 +111,13 @@ class DraftExtend:
         """Capture one draft-extend graph per batch size and verify width."""
         keys = [(bs, w) for bs in sorted(batch_sizes, reverse=True) for w in self._widths(bs) if w <= self.width]
         self._graphs = capture_graphs(keys, self._forward)
+        sampled = self.steps.sampled
+        if sampled is not None:
+            sampled.active = True
+            try:
+                self._sampled_graphs = capture_graphs(keys, self._forward)
+            finally:
+                sampled.active = False
         logger.info("eagle-harness: captured %d draft-extend graphs", len(self._graphs))
 
     def _forward(self, key: Tuple[int, int]) -> None:
@@ -127,7 +137,11 @@ class DraftExtend:
             hidden_states=self.input_hidden[:rows],
         )
         tree = self.tree
-        probs, tokens = draft_topk(self.model, normed.index_select(0, last), tree.shape.top_k)
+        sampled = self.steps.sampled
+        if sampled is not None and sampled.active:
+            probs, tokens = sampled.draw(self.model, normed.index_select(0, last), bs, 0)
+        else:
+            probs, tokens = draft_topk(self.model, normed.index_select(0, last), tree.shape.top_k)
         tree.root_probs[:bs] = probs
         tree.root_tokens[:bs] = tokens
         torch.index_select(hidden, 0, last, out=tree.root_hidden[:bs])

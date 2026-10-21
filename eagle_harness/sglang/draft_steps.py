@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable, Dict, Sequence, Tuple, TypeVar
+from typing import Callable, Dict, Optional, Sequence, Tuple, TypeVar
 
 import torch
 
@@ -97,7 +97,9 @@ def capture_graphs(keys: Sequence[K], body: Callable[[K], None]) -> Dict[K, torc
 class DraftSteps:
     """Owns the per-step graphs of the draft tree."""
 
-    def __init__(self, draft_runner, tree: DraftTree, attention: DraftRowAttention):
+    def __init__(self, draft_runner, tree: DraftTree, attention: DraftRowAttention, *, sampled_seed: Optional[int] = None):
+        """``sampled_seed``: the Philox seed of the recorded-q sampled tree (the same on every TP rank); None builds
+        no sampled tree (the engine's verify cannot sample it)."""
         self.runner = draft_runner
         self.model = draft_runner.model
         self.tree = tree
@@ -112,6 +114,14 @@ class DraftSteps:
         # Host mirror of tree.deltas, written by the graphs of the tree's delta slots (0: begin, d: step d).
         self.host_deltas = torch.zeros(tree.deltas.shape, dtype=torch.float32, pin_memory=True)
         self._graphs: Dict[Tuple[int, int], torch.cuda.CUDAGraph] = {}
+        self.sampled = None
+        if sampled_seed is not None and hasattr(self.model, "proposal_candidates"):
+            from eagle_harness.sglang.sampled_tree import SampledTree
+
+            self.sampled = SampledTree(
+                tree, self.model.num_candidates, sampled_seed, req_index=self.req_pool_indices, rows=self.req_to_token.shape[0]
+            )
+        self._sampled_graphs: Dict[Tuple[int, int], torch.cuda.CUDAGraph] = {}
 
     @property
     def max_step(self) -> int:
@@ -135,7 +145,8 @@ class DraftSteps:
 
     def run(self, bs: int, step: int) -> None:
         """Replay draft step ``step`` (0: :meth:`DraftTree.begin`)."""
-        graph = self._graphs.get((bs, step))
+        graphs = self._sampled_graphs if self.sampled is not None and self.sampled.active else self._graphs
+        graph = graphs.get((bs, step))
         if graph is not None:
             graph.replay()
         else:
@@ -145,6 +156,12 @@ class DraftSteps:
         """Capture begin and every step for each batch size (largest first)."""
         keys = [(bs, step) for bs in sorted(batch_sizes, reverse=True) for step in range(self.max_step, -1, -1)]
         self._graphs = capture_graphs(keys, self._body)
+        if self.sampled is not None:
+            self.sampled.active = True
+            try:
+                self._sampled_graphs = capture_graphs(keys, self._body)
+            finally:
+                self.sampled.active = False
         logger.info("eagle-harness: captured %d draft-step graphs (bs %s)", len(self._graphs), sorted(batch_sizes))
 
     # ------------------------------------------------------------------ body
@@ -173,5 +190,8 @@ class DraftSteps:
             out_cache_loc=slots,
             hidden_states=tree.front_hidden[:rows],
         )
-        probs, tokens = draft_topk(self.model, normed, k)
+        if self.sampled is not None and self.sampled.active:
+            probs, tokens = self.sampled.draw(self.model, normed, bs, step)
+        else:
+            probs, tokens = draft_topk(self.model, normed, k)
         tree.step(bs, step, probs, tokens, hidden)

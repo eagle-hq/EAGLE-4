@@ -133,6 +133,18 @@ def test_prelaunched_and_direct_rounds_run_the_same_steps(stop):
     assert steps.ran == resumed_steps.ran == list(range(1, stop + 1))
 
 
+@pytest.mark.parametrize("stop", [3, 5, 99])
+def test_sampled_depth_uses_the_previous_round_plan(stop):
+    drafter, steps = _sequenced(True, stop)
+    steps.sampled = SimpleNamespace(active=True)
+    drafter._sampled_depth = 6
+    first = drafter._queue_until_decision(1, drafter.cost)
+    depth = drafter._grow(1, first, None, 32, drafter.cost)
+    assert depth == 6
+    assert steps.ran == list(range(1, 6))
+    assert drafter._sampled_depth == (stop + 1 if stop <= 5 else 8)
+
+
 def test_grow_stops_at_the_deepest_level():
     drafter, steps = _sequenced(True, stop=99)
     assert drafter._grow(1, drafter._queue_until_decision(1, drafter.cost), None, 32, drafter.cost) == DEPTH

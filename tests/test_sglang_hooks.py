@@ -84,6 +84,8 @@ def test_optional_hook_accepts_absence_but_not_signature_drift(monkeypatch):
         (
             hooks.Hook(f"{algo}.no_such_hook", (), hooks.OVERRIDE, optional=True),
             hooks.Hook(f"{algo}.req_to_token_extra_len", ("wrong",), hooks.OVERRIDE, optional=True),
+            # an optional keyword sglang does not take yet (T=1's sampling_step on the 0.1.0 engine)
+            hooks.Hook(f"{algo}.req_to_token_extra_len", ("no_such_keyword",), hooks.CALL, optional=True),
         ),
     )
     assert hooks.hook_problems() == [f"{algo}.req_to_token_extra_len('page_size',) is not ('wrong',)"]
