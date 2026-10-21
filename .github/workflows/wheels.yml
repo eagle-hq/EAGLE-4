@@ -1,6 +1,7 @@
 # Build the sdist, the binary wheel and the pure wheel with tools/build_wheel.sh, then check them (twine check and
 # tools/check_dist.py: name, version, extras, entry points, contents, license state). Nothing is uploaded here: the
-# files are a workflow artifact; publish.yml and the source repo's release workflow call this workflow.
+# files are a workflow artifact. A release's files are built here before the release, qualified, staged on the draft
+# release (tools/release_files.py stage) and uploaded to PyPI unchanged by publish.yml.
 #
 # The binary wheel carries the native candidate-head library prebuilt for CUDA 12.9 and 13.0
 # (eagle_harness/kernels/build.py), so `pip install` needs no nvcc; the sdist and the pure wheel build it on first use.

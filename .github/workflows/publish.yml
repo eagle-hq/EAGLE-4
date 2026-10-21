@@ -1,8 +1,9 @@
-# Public eagle-harness: upload a release to PyPI. Publishing a GitHub release vX.Y.Z on this repo builds the files with
-# wheels.yml and uploads them with PyPI trusted publishing (no API token) once a maintainer approves the `pypi`
-# environment. The files go to PyPI only: the GitHub release carries the engine wheels (tools/engine_release.py). In the
-# private source repo this workflow is skipped: releases there come from release-please, and the upload happens on this
-# repo after the export.
+# Public eagle-harness: upload a release to PyPI. Publishing a GitHub release vX.Y.Z on this repo uploads the release's
+# qualified harness files (the sdist, the binary wheel and the pure wheel, staged on the draft release with their
+# harness-SHA256SUMS by tools/release_files.py) to PyPI with trusted publishing (no API token). These are the exact
+# files the release images and the release benchmarks installed, so the job verifies and uploads them instead of
+# rebuilding. Once PyPI serves the same SHA256s, `tools/release_files.py remove` takes them off the release page, which
+# keeps only the engine wheels (tools/engine_release.py). In the private source repo this workflow is skipped.
 name: publish
 
 on:
@@ -13,25 +14,32 @@ permissions:
   contents: read
 
 jobs:
-  wheels:
-    if: github.repository == 'eagle-hq/EAGLE-4'
-    uses: ./.github/workflows/wheels.yml
-    with:
-      ref: ${{ github.event.release.tag_name }}
-
   publish:
-    needs: wheels
+    if: github.repository == 'eagle-hq/EAGLE-4'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     environment:
       name: pypi
       url: https://pypi.org/project/eagle-harness/
     permissions:
+      contents: read
       id-token: write  # PyPI trusted publishing
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          name: dist
-          path: dist
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install twine
+      - name: The release's harness files, each checked against harness-SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: python tools/release_files.py fetch "$TAG" dist
+      - run: python -m twine check --strict dist/*.tar.gz dist/*.whl dist/pure/*.whl
+      - run: python tools/check_dist.py dist
       - name: The upload set (sdist, binary wheel, pure wheel) carries the tag's version
         env:
           TAG: ${{ github.event.release.tag_name }}
