@@ -2,8 +2,8 @@
 # Copyright 2026 Eagle AI Corp.
 # SPDX-License-Identifier: LicenseRef-Eagle-4-Source-Available
 
-# Sketch only. Base and final image need clean-build qualification.
-FROM vllm/vllm-openai:nightly-49cb2bbf71cfd36ee5aa33d1e184b1cddff55294
+# The base is pinned by digest: the published image's base layers.
+FROM vllm/vllm-openai:nightly-49cb2bbf71cfd36ee5aa33d1e184b1cddff55294@sha256:a8d84c552462d1c60da4d7fc97f8f8f48a8fbfbf6820f73477fa0efe2571bf9d
 COPY pyproject.toml README.md LICENSE NOTICE TRADEMARKS.md THIRD_PARTY_NOTICES.md /src/
 COPY LICENSES/ /src/LICENSES/
 COPY eagle_harness/ /src/eagle_harness/
