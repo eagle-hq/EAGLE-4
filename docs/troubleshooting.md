@@ -39,6 +39,16 @@ tokenspeed: not installed
 no supported host installed (one of: sglang, vllm, tokenspeed)
 ```
 
+## Install problems
+
+| symptom | cause | fix |
+|---|---|---|
+| `The virtual environment was not created successfully because ensurepip is not available` | Ubuntu ships `venv` without `ensurepip` | `apt install python3.12-venv`, then create the environment again |
+| pip builds `cuda-tile` from source or cannot find `cuda-tile==1.6.0rc5` | the SGLang command ran without `--extra-index-url https://pypi.nvidia.com` | use the full command from [Install](install.md#sglang-cuda) |
+| pip installs a stock `sglang`, `vllm` or `tokenspeed` | the engine pin or the EAGLE-4 index is missing, and stock packages have no EAGLE-4 hooks | pin the exact `+eagle.N` version with the EAGLE-4 index, as in [Install](install.md) |
+| JIT compilation fails with `rsqrt`/`rsqrtf` exception-specification errors | CUDA 13.0 `nvcc` with the C headers of Ubuntu 26.04 / glibc 2.43 | `export CUDA_HOME=/usr/local/cuda-13.2` (a CUDA toolkit compatible with the host headers), or use a release image. The wheel index stays `cu130`. |
+| `eagle_harness.__file__` points into a checkout of this repository | `python -m` puts the current directory first on the import path, so a server started inside the checkout runs the source tree | start servers from another directory, or with the `sglang serve` and `vllm serve` commands, which do not import from the current directory |
+
 ## Server errors at startup
 
 | message | cause | fix |
@@ -60,13 +70,14 @@ no supported host installed (one of: sglang, vllm, tokenspeed)
 | `FlashInferSamplingBackend cannot verify draft trees; use --sampling-backend greedy or triton` (TokenSpeed) | TokenSpeed's default sampling backend | pass `--sampling-backend greedy` |
 | `--speculative-num-draft-tokens N verifies more nodes than a tree of depth ... holds` (TokenSpeed) | the tree cannot fill the verify width | raise `--speculative-num-steps` or `--speculative-eagle-topk`, or lower the width |
 | `EAGLE-4 drafts with [...] are not ported to eagle-harness yet (dense drafts only).` | a draft structure the engine does not build (see the FAQ, "Which models work?") | use a supported single-layer EAGLE-4 draft |
+| `TypeError: int() argument must be ... not 'NoneType'` in `average_context`, on the first request (sglang) | `eagle-harness` 0.1.0 with SGLang's default overlap scheduler | upgrade to `eagle-harness` 0.1.1 or newer, which serves with the overlap scheduler, or pass `--disable-overlap-schedule` |
 
 ## Requests refused
 
 sglang refuses requests with multimodal inputs (`Speculative algorithm EAGLE_HARNESS does not support multimodal
 inputs.`). Serve them from a server without the method.
 
-## Slower than expected
+## Throughput below the support matrix
 
 - Check that the cost tables match your GPU, TP size, tree shape and engine build ([Calibration](calibration.md)).
   A mismatched `key.json` is refused. Unkeyed legacy tables can load with a warning, and the key does not
