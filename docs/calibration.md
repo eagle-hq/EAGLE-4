@@ -8,17 +8,27 @@ last_verified: 2026-10-20
 
 ## Costs measured on the served rounds
 
+On CUDA, startup warms the fused single-request tree acceptance kernels and the engine's draft softmax using
+the served vocabulary size. Tree widths and depths up to 32 share the warmed acceptance programs. Larger shapes
+and other engine kernels may still compile on first use; startup warm-up is not a guarantee of stall-free requests.
+
 On SGLang the cost-model modes need no offline step. Without `data_path`, a matching packaged MI355X profile
 is selected when available. Otherwise, the server prices the draft step and target verify on its own served rounds. The first rounds at each batch bucket (a captured graph batch size) force
 every captured verify width a few times, timed with CUDA events around the exact kernels served at the real
 context length; after that every round refines its cell (an exponential moving average per batch bucket, verify
-width and 1024-token context interval) and the cost model reads the resulting tables. The cells are cached under
+width and 1024-token context interval) and the cost model reads the resulting tables. A cell's value starts as the
+fastest of its first samples, and a later sample counts at most twice the cell's value, so a single slow round
+(for example a kernel compiled on first use) moves a cell by a few percent and a lasting change still converges.
+Until a new context interval has those first samples, it is priced from the nearest interval that has them.
+If the initial seed samples span several intervals and none is fully seeded yet, their minimum supplies the price.
+The cells are cached under
 `cost_cache` (default `~/.cache/eagle-harness/costs/<key>.json`), keyed by GPU name, TP size, the target's and the
 draft's `config.json` digests, the engine version and the dtype, so a restart on the same setup starts with the
 costs it ended with and a different setup measures again. All TP ranks decide from rank 0's cells.
 
 The live cache also checks the draft top-k and depth, because they change the work being timed. Invalid or
-unreadable caches are ignored and remeasured. Cached and refreshed curves outside the cost model's supported
+unreadable caches are ignored and remeasured, and so are caches written by eagle-harness 0.1.0, once, after an
+upgrade. Cached and refreshed curves outside the cost model's supported
 ratios keep the fixed-shape policy until usable measurements arrive; they do not fail the next decode round.
 Seeding is bounded by the captured widths and sample count, not a wall-clock deadline, and occurs on served
 rounds (including engine warmup requests), not during graph capture. Live timings alone do not establish

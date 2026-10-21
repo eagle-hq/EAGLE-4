@@ -116,6 +116,55 @@ def test_cache_reseeds_when_the_draft_step_shape_changes(tmp_path):
         assert not changed.load(path) and not changed.cells
 
 
+def test_one_stalled_round_moves_a_seeded_cell_by_a_few_percent_at_most():
+    live = _live(alpha=0.05)
+    _seed(live, 1, {1: 3000.0, 16: 3464.0, 8: 3200.0, 32: 4000.0, 64: 5000.0})
+    cell = live.cells[(1, 16, 0)]
+    live.record(1, 16, 500, 320_000.0)  # a kernel compiled inside the round
+    assert 3464.0 < cell.us <= 3464.0 * 1.05
+    assert live.tables()[1].intervals[0].target.value[2] == cell.us
+
+
+def test_a_lasting_change_still_converges():
+    live = _live(alpha=0.05)
+    _seed(live, 1, {1: 3000.0, 16: 3464.0, 8: 3200.0, 32: 4000.0, 64: 5000.0})
+    for _ in range(200):
+        live.record(1, 16, 500, 3 * 3464.0)
+    assert live.cells[(1, 16, 0)].us == pytest.approx(3 * 3464.0, rel=0.01)
+    for _ in range(200):
+        live.record(1, 16, 500, 2000.0)
+    assert live.cells[(1, 16, 0)].us == pytest.approx(2000.0, rel=0.01)
+
+
+def test_a_new_interval_is_priced_from_a_seeded_one_until_it_has_seed_samples():
+    live = _live()
+    _seed(live, 1, {1: 3000.0, 16: 3464.0, 8: 3200.0, 32: 4000.0, 64: 5000.0}, context=500)
+    far = live.interval(6000)
+    live.record(1, 16, 6000, 320_000.0)  # the interval's first sample stalls
+    assert live.tables()[1].intervals[far].target.value[2] == 3464.0
+    live.record(1, 16, 6000, 3600.0)  # seed_samples=2: the interval's own minimum takes over
+    assert live.tables()[1].intervals[far].target.value[2] == 3600.0
+
+
+def test_seed_samples_split_across_intervals_do_not_publish_one_stall():
+    live = _live()
+    _seed(live, 1, {1: 3000.0, 8: 3200.0, 32: 4000.0, 64: 5000.0})
+    live.record(1, 16, 2000, 320_000.0)
+    live.record(1, 16, 2100, 3464.0)  # seed sweep crosses the context-interval boundary
+    assert live.ready(1)
+    assert all(interval.target.value[2] == 3464.0 for interval in live.tables()[1].intervals)
+
+
+def test_cache_of_another_cell_rule_is_measured_again(tmp_path):
+    live = _live()
+    _seed(live, 1, {1: 4000.0, 64: 7200.0, 32: 5700.0, 16: 4800.0, 8: 4500.0})
+    path = tmp_path / "costs.json"
+    data = live.to_dict()
+    del data["version"]  # written before the outlier rule
+    path.write_text(json.dumps(data))
+    assert not _live().load(str(path))
+
+
 @pytest.mark.parametrize("us", [float("nan"), float("inf"), -1.0, 0.0])
 def test_nonfinite_or_nonpositive_timings_do_not_seed_a_bucket(us):
     live = _live()

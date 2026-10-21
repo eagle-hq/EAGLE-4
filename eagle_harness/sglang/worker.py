@@ -52,10 +52,12 @@ from sglang.srt.speculative.draft_utils import DraftBackendFactory
 from sglang.srt.speculative.eagle_utils import default_tree_mask_mode
 from sglang.srt.speculative.eagle_worker_common import run_eagle_verify
 from sglang.srt.speculative.eagle_worker_v2 import EagleDraftWorker, EAGLEWorkerV2
+from sglang.srt.speculative import spec_utils
 from sglang.srt.speculative.spec_utils import draft_tp_context, spec_stage_span
 from sglang.version import __version__ as sglang_version
 
 from eagle_harness.core.chain_width import chain_widths
+from eagle_harness.kernels.accept_tail import warm_up as warm_up_accept_tail
 from eagle_harness.core.config import HarnessConfig, Mode, build_cost_model, parse_harness_config
 from eagle_harness.core.cost_model import CostModel, FixedShapePolicy
 from eagle_harness.core.limits import ComputeIntensity
@@ -165,6 +167,21 @@ class HarnessDraftWorker(EagleDraftWorker):
             widths=lambda bs: verify_widths(bs, intensity, width),
         )
         self.tree_mask_mode = default_tree_mask_mode()
+        self._warm_up_kernels()
+
+    def _warm_up_kernels(self) -> None:
+        """Compile, before serving, the kernels whose first use would otherwise stall a served round: the fused
+        accept step (batch-size-1 trees) and the softmax of sglang's draft extend after a prefill (a JIT module).
+        """
+        if torch.device(self.device).type != "cuda":
+            return
+        if self.topk > 1:
+            warm_up_accept_tail(self.extend.hidden_rows(2), self.target_worker.model_runner.dtype)
+        softmax = getattr(spec_utils, "sampling_softmax", None)
+        if softmax is not None:
+            # The engine dispatches by vocabulary size; a tiny tensor can warm a different backend.
+            vocab_size = self.draft_runner.model.logits_processor.vocab_size
+            softmax(torch.zeros(1, vocab_size, dtype=torch.float32, device=self.device))
 
     def _capture_cuda_graphs(self) -> None:
         self.cuda_graph_runner = None

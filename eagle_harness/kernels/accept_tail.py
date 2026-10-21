@@ -11,6 +11,10 @@ is the walk and all of the index and token bookkeeping in one program;
 verify's hidden states) to the front. Both reproduce sglang's results exactly
 (``verify_tree_greedy``, ``fill_bonus_tokens``, ``assign_extend_cache_locs``,
 ``fill_accept_out_cache_loc`` and ``_compact_accept_to_front``).
+
+The tree width and depth are runtime arguments, so one compiled program serves every verify shape of a
+process (up to :data:`LANES` nodes and levels): a new shape chosen by the cost model never compiles a kernel
+inside a served round, and :func:`warm_up` compiles both kernels at startup.
 """
 
 from __future__ import annotations
@@ -20,6 +24,14 @@ from typing import NamedTuple, Optional
 import torch
 import triton
 import triton.language as tl
+
+
+# Lanes of the index vectors: one warp, so every tree up to 32 nodes and 32 levels shares one program.
+LANES = 32
+
+
+def _lanes(n: int) -> int:
+    return max(triton.next_power_of_2(n), LANES)
 
 
 class Accepted(NamedTuple):
@@ -34,7 +46,13 @@ class Accepted(NamedTuple):
     accepted_slots: torch.Tensor  # int64 [depth]: KV slots they were written to by the verify (0 past accept_lens)
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=["req_stride", "width", "depth"],
+    do_not_specialize_on_alignment=[
+        "target_ptr", "candidates_ptr", "retrieve_index_ptr", "retrieve_next_token_ptr", "retrieve_next_sibling_ptr",
+        "seq_lens_ptr", "out_cache_loc_ptr", "req_to_token_ptr", "req_pool_idx_ptr",
+    ],
+)
 def _accept_tail_kernel(
     target_ptr,
     candidates_ptr,
@@ -53,13 +71,13 @@ def _accept_tail_kernel(
     bonus_ptr,
     committed_slots_ptr,
     accepted_slots_ptr,
-    WIDTH: tl.constexpr,
-    DEPTH: tl.constexpr,
+    width,
+    depth,
     WIDTH_P2: tl.constexpr,
     DEPTH_P2: tl.constexpr,
 ):
     ds = tl.arange(0, DEPTH_P2)
-    tl.store(accept_index_ptr + ds, -1, mask=ds < DEPTH)
+    tl.store(accept_index_ptr + ds, -1, mask=ds < depth)
     tl.debug_barrier()
 
     # The tree walk: at each level take the first child of the last accepted node whose token is the
@@ -69,12 +87,12 @@ def _accept_tail_kernel(
     cur = last * 0
     num = last * 0
     active = last * 0 + 1
-    for level in range(1, DEPTH):
+    for level in range(1, depth):
         if active != 0:
             cur = tl.load(retrieve_next_token_ptr + cur)
             target_token = tl.load(target_ptr + last)
             found = last * 0
-            for sibling in range(WIDTH):
+            for sibling in range(width):
                 if found == 0:
                     valid = cur != -1
                     safe = tl.where(valid, cur, 0)
@@ -96,22 +114,22 @@ def _accept_tail_kernel(
 
     # The predictions, the accepted path moved to the front (padding: node 0, which is always accepted).
     nodes = tl.arange(0, WIDTH_P2)
-    head = nodes < DEPTH
+    head = nodes < depth
     path = tl.load(accept_index_ptr + nodes, mask=head, other=-1).to(tl.int64)
     head_value = tl.load(target_ptr + tl.maximum(path, 0), mask=head, other=0)
-    accepted = tl.load(accept_index_ptr + ds, mask=(ds <= num) & (ds < DEPTH), other=-1).to(tl.int64)
+    accepted = tl.load(accept_index_ptr + ds, mask=(ds <= num) & (ds < depth), other=-1).to(tl.int64)
     on_path = tl.sum((nodes[:, None] == accepted[None, :]).to(tl.int32), axis=1) > 0
-    tail_value = tl.where(on_path, tl.load(target_ptr + nodes, mask=nodes < WIDTH, other=0), 0)
-    tl.store(predict_ptr + nodes, tl.where(head, head_value, tail_value).to(tl.int32), mask=nodes < WIDTH)
+    tail_value = tl.where(on_path, tl.load(target_ptr + nodes, mask=nodes < width, other=0), 0)
+    tl.store(predict_ptr + nodes, tl.where(head, head_value, tail_value).to(tl.int32), mask=nodes < width)
 
     # The KV slots to move: the request's next free slots, and where the verify wrote the accepted tokens.
     row = tl.load(req_pool_idx_ptr).to(tl.int64)
-    keep = (ds <= num) & (ds < DEPTH)
-    path = tl.load(accept_index_ptr + ds, mask=ds < DEPTH, other=-1).to(tl.int64)
+    keep = (ds <= num) & (ds < depth)
+    path = tl.load(accept_index_ptr + ds, mask=ds < depth, other=-1).to(tl.int64)
     committed = tl.load(req_to_token_ptr + row * req_stride + seq_len + ds, mask=keep, other=0)
-    tl.store(committed_slots_ptr + ds, committed.to(tl.int64), mask=ds < DEPTH)
+    tl.store(committed_slots_ptr + ds, committed.to(tl.int64), mask=ds < depth)
     accepted_slot = tl.load(out_cache_loc_ptr + path, mask=keep, other=0)
-    tl.store(accepted_slots_ptr + ds, accepted_slot.to(tl.int64), mask=ds < DEPTH)
+    tl.store(accepted_slots_ptr + ds, accepted_slot.to(tl.int64), mask=ds < depth)
 
 
 def accept_tail(
@@ -160,16 +178,16 @@ def accept_tail(
         out.bonus_tokens,
         out.committed_slots,
         out.accepted_slots,
-        WIDTH=width,
-        DEPTH=depth,
-        WIDTH_P2=triton.next_power_of_2(width),
-        DEPTH_P2=triton.next_power_of_2(depth),
+        width,
+        depth,
+        WIDTH_P2=_lanes(width),
+        DEPTH_P2=_lanes(depth),
         num_warps=1,
     )
     return out
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["depth"])
 def _compact_rows_kernel(
     src_ptr,
     dst_ptr,
@@ -177,13 +195,13 @@ def _compact_rows_kernel(
     src_stride,
     dst_stride,
     cols,
-    DEPTH: tl.constexpr,
+    depth,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0)
     offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    path = tl.load(accept_index_ptr + tl.minimum(row, DEPTH - 1)).to(tl.int64)
-    source = tl.where(row < DEPTH, tl.maximum(path, 0), row)
+    path = tl.load(accept_index_ptr + tl.minimum(row, depth - 1)).to(tl.int64)
+    source = tl.where(row < depth, tl.maximum(path, 0), row)
     values = tl.load(src_ptr + source * src_stride + offsets, mask=offsets < cols)
     tl.store(dst_ptr + row.to(tl.int64) * dst_stride + offsets, values, mask=offsets < cols)
 
@@ -201,6 +219,31 @@ def compact_rows(
     elif out.shape != rows.shape or out.stride(1) != 1 or out.data_ptr() == rows.data_ptr():
         raise ValueError("compact_rows needs an out of the rows' shape, unit column stride, not the rows")
     _compact_rows_kernel[(width, triton.cdiv(cols, block))](
-        rows, out, accept_index, rows.stride(0), out.stride(0), cols, DEPTH=accept_index.shape[1], BLOCK=block
+        rows, out, accept_index, rows.stride(0), out.stride(0), cols, accept_index.shape[1], BLOCK=block
     )
     return out
+
+
+def warm_up(hidden_rows: torch.Tensor, hidden_dtype: torch.dtype) -> None:
+    """Compile :func:`accept_tail` and :func:`compact_rows` for a server before it serves.
+
+    ``hidden_rows`` is the buffer the served compaction writes (``[rows >= 2, cols]``; its first two rows are
+    overwritten) and ``hidden_dtype`` the dtype of the verify's hidden states it reads. The other served inputs
+    are int64 (target tokens, tree tables, lengths, KV slots) and an int32 ``req_to_token``, as here.
+    """
+    long = dict(dtype=torch.int64, device=hidden_rows.device)
+    tokens = torch.zeros(2, **long)
+    tables = torch.tensor([[1, -1]], **long)
+    accepted = accept_tail(
+        tokens,
+        tokens,
+        torch.arange(2, **long).reshape(1, 2),
+        tables,
+        tables,
+        torch.ones(1, **long),
+        tokens,
+        torch.zeros(1, 4, dtype=torch.int32, device=hidden_rows.device),
+        torch.zeros(1, **long),
+        2,
+    )
+    compact_rows(torch.zeros_like(hidden_rows[:2], dtype=hidden_dtype), accepted.accept_index, out=hidden_rows[:2])

@@ -7,8 +7,11 @@ Offline calibration prices the draft step and the target verify on dummy batches
 size, model pair, engine build and dtype. :class:`LiveCosts` prices them on the engine's own served rounds
 instead: a seed sweep forces each captured verify width for a few rounds per batch bucket (the exact kernels
 served, at the real context), then every served round refines its cell (an EMA per batch bucket, verify width
-and context interval). The cells become the same :class:`~eagle_harness.core.cost_table.BatchCostTable` objects
-the :class:`~eagle_harness.core.cost_model.CostModel` reads, so the decision code has one input.
+and context interval). A cell's value is the fastest of its first samples, and a later sample enters the EMA at
+most at :data:`OUTLIER_RATIO` times the cell, so one stalled round (a kernel compiled on first use, a host
+hiccup) moves a cell by a few percent at most and a lasting change still converges. The cells become the same
+:class:`~eagle_harness.core.cost_table.BatchCostTable` objects the :class:`~eagle_harness.core.cost_model.CostModel`
+reads, so the decision code has one input.
 
 A :class:`CostKey` names the setup the costs belong to. Offline tables carry it in ``key.json`` under their
 ``data_path``; live costs carry it in their cache file. Costs whose key differs from the server's are refused
@@ -107,6 +110,12 @@ def check_key(data_path: str, key: CostKey) -> None:
 
 
 # ------------------------------------------------------------------ live cells
+# Cache files written under another rule for the cells are measured again.
+CACHE_VERSION = 2
+# A refining sample counts at most at this multiple of its cell.
+OUTLIER_RATIO = 2.0
+
+
 @dataclass
 class Cell:
     """One timed shape: microseconds (min of the seed samples, then an EMA) and the sample count."""
@@ -166,18 +175,19 @@ class LiveCosts:
         if cell.samples < self.seed_samples:
             cell.us = us if cell.samples == 0 else min(cell.us, us)
         else:
-            cell.us += self.alpha * (us - cell.us)
+            cell.us += self.alpha * (min(us, OUTLIER_RATIO * cell.us) - cell.us)
         cell.samples += 1
 
     # ---------------------------------------------------------------- tables
     def _value(self, bucket: int, width: int, interval: int) -> Optional[float]:
-        """The cell's cost, from the nearest measured interval when this one has no sample."""
+        """Use the nearest fully seeded interval, or the pooled seed minimum if none is fully seeded yet."""
         for d in range(self.context_intervals):
             for i in (interval - d, interval + d):
                 cell = self.cells.get((bucket, width, i))
-                if cell is not None and cell.samples:
+                if cell is not None and cell.samples >= self.seed_samples:
                     return cell.us
-        return None
+        # Seeding counts samples across intervals; crossing a boundary must still discard a first-use stall.
+        return min((c.us for (b, w, _), c in self.cells.items() if b == bucket and w == width and c.samples), default=None)
 
     def tables(self) -> Dict[int, BatchCostTable]:
         """One table per ready bucket (the cost model's input), from the current cells."""
@@ -209,6 +219,7 @@ class LiveCosts:
     def to_dict(self) -> dict:
         """The cells and key as JSON data."""
         return {
+            "version": CACHE_VERSION,
             "key": None if self.key is None else self.key.to_dict(),
             "draft_shape": list(self.draft_shape),
             "context_step": self.context_step,
@@ -233,7 +244,8 @@ class LiveCosts:
                 raise ValueError("expected an object")
             key = None if data.get("key") is None else CostKey.from_dict(data["key"])
             if (
-                key != self.key or data.get("draft_shape") != list(self.draft_shape)
+                data.get("version") != CACHE_VERSION
+                or key != self.key or data.get("draft_shape") != list(self.draft_shape)
                 or (data["context_step"], data["context_intervals"]) != (self.context_step, self.context_intervals)
             ):
                 logger.info("Live cost cache %s is for another setup; measuring again.", path)

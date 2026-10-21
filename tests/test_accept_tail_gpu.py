@@ -17,7 +17,8 @@ from sglang.srt.speculative.eagle_utils import verify_tree_greedy_func  # noqa: 
 from sglang.srt.speculative.eagle_worker_common import _compact_accept_to_front  # noqa: E402
 from sglang.srt.speculative.spec_utils import assign_extend_cache_locs  # noqa: E402
 
-from eagle_harness.kernels.accept_tail import accept_tail, compact_rows  # noqa: E402
+from eagle_harness.kernels import accept_tail as accept_tail_module  # noqa: E402
+from eagle_harness.kernels.accept_tail import accept_tail, compact_rows, warm_up  # noqa: E402
 
 
 def _tree(width, rng):
@@ -118,6 +119,38 @@ def test_compact_rows_matches_sglang(cols):
     accept_index = torch.tensor([[0, 3, 7, 8, -1, -1, -1, -1]], dtype=torch.int32, device="cuda")
     expected = _compact_accept_to_front(rows, accept_index, 1, num_draft_tokens=16)
     assert torch.equal(compact_rows(rows, accept_index), expected)
+
+
+def _compiled(kernel) -> int:
+    return len(kernel.device_caches[torch.cuda.current_device()][0])
+
+
+def test_warm_up_compiles_the_one_program_every_served_shape_runs():
+    """After the startup warm-up, no verify width or depth up to 32 compiles a kernel in a served round."""
+    hidden = torch.zeros(64, 5120, dtype=torch.bfloat16, device="cuda")
+    warm_up(hidden, torch.bfloat16)
+    kernels = (accept_tail_module._accept_tail_kernel, accept_tail_module._compact_rows_kernel)
+    before = [_compiled(k) for k in kernels]
+    rng = random.Random(7)
+    long = dict(dtype=torch.int64, device="cuda")
+    for width, depth in ((16, 12), (9, 8), (4, 4), (2, 2), (31, 12), (32, 32), (8, 1)):
+        candidates, next_token, next_sibling, target = _tree(width, rng)
+        accepted = accept_tail(
+            torch.tensor(target, **long),
+            torch.tensor(candidates, **long),
+            torch.arange(width, **long).reshape(1, width),
+            torch.tensor(next_token, **long).reshape(1, width),
+            torch.tensor(next_sibling, **long).reshape(1, width),
+            torch.tensor([rng.randrange(1, 150)], **long),
+            torch.randint(1, 1 << 20, (width + 1,), **long)[1:],  # 8-byte aligned, as a slice of a slot list can be
+            torch.randint(1, 1 << 20, (3, 200 + width), dtype=torch.int32, device="cuda"),
+            torch.tensor([1], **long),
+            depth,
+        )
+        rows = torch.randn(width, 5120, device="cuda").to(torch.bfloat16)
+        compact_rows(rows, accepted.accept_index, out=hidden[:width])
+    torch.cuda.synchronize()
+    assert [_compiled(k) for k in kernels] == before
 
 
 def test_tail_graphs_run_a_non_idempotent_body_once_per_round():

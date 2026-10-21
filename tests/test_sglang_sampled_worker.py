@@ -71,6 +71,31 @@ def test_draft_worker_built_like_sglang_seeds_the_sampled_tree_only_with_the_hoo
     assert draft.steps is steps  # every sglang-built draft worker has its DraftSteps before the first round
 
 
+@pytest.mark.parametrize("vocab_size", [32, 128256, 248320])
+def test_startup_softmax_uses_the_served_vocabulary(monkeypatch, vocab_size):
+    """Shape-based backend dispatch must see the same vocabulary during warm-up and serving."""
+    worker = SimpleNamespace(
+        device="cuda", topk=1,
+        draft_runner=SimpleNamespace(model=SimpleNamespace(logits_processor=SimpleNamespace(vocab_size=vocab_size))),
+    )
+    zeros = torch.zeros
+    allocations, calls = [], []
+
+    def allocate(*shape, dtype, device):
+        allocations.append((shape, dtype, device))
+        return zeros(*shape, dtype=dtype)
+
+    def softmax(logits):
+        calls.append((tuple(logits.shape), logits.dtype))
+        return logits.softmax(dim=-1)
+
+    monkeypatch.setattr(worker_mod.torch, "zeros", allocate)
+    monkeypatch.setattr(worker_mod.spec_utils, "sampling_softmax", softmax)
+    worker_mod.HarnessDraftWorker._warm_up_kernels(worker)
+    assert allocations == [((1, vocab_size), torch.float32, "cuda")]
+    assert calls == [((1, vocab_size), torch.float32)]
+
+
 @pytest.mark.parametrize("engine_verify, active", [(_verify_without_hook, False), (_verify_with_hook, False), (_verify_with_hook, True)])
 def test_verify_passes_the_tree_sampler_only_for_an_active_sampled_tree(monkeypatch, engine_verify, active):
     monkeypatch.setattr(worker_mod, "run_eagle_verify", engine_verify)
