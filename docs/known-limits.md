@@ -1,7 +1,7 @@
 ---
 type: reference
 owner: eagle-harness
-last_verified: 2026-10-20
+last_verified: 2026-10-21
 ---
 
 # Known limits
@@ -25,22 +25,28 @@ kernel is a startup check.
 
 - SGLang TP4 single-request and 32K-context optimization is in progress, as is TP8 concurrency-8 prefill
   overhead and intermittent stalls. Repeated passes in one process are not independent server starts.
-- SGLang automatic high-load policy and high-load fixed-chain improvements are being qualified and stay off by
-  default, as does work on high-load and Nemotron first divergences. A release-engine cap-512 startup and
-  request smoke passes; high-load acceleration and concurrent correctness are being measured.
+- SGLang above concurrency 64: with a running cap of 512 and the default tree (TP4), EAGLE-4 measured 1.03x the
+  same engine without speculation at concurrency 64, 0.73x at 256 and 0.61x at 512 (3 starts each). Serve
+  concurrency above 64 without speculation for now. The automatic high-load policy and high-load fixed-chain
+  improvements are being qualified and stay off by default. Greedy agreement with no-spec at concurrency 512 is
+  not claimed: the engine without speculation also differs between two starts there.
 - SGLang native-OFF, including OFF forced by a cost profile, uses the engine's per-variant forward-mode
-  decode graphs (the `forward_mode` field of the decode graph variant). They arrive with the next SGLang
-  engine release; on the 0.1.0 SGLang CUDA engine EAGLE-4 keeps native-OFF off.
+  decode graphs (the `forward_mode` field of the decode graph variant). The SGLang CUDA engine
+  `0.5.23.dev252+eagle.5` has them. On the 0.1.0 SGLang CUDA engine and on ROCm, EAGLE-4 keeps native-OFF off.
 - The SGLang temperature-1 sampled tree (draft proposals drawn in one fused launch and verified against their
-  recorded probabilities) uses the engine's `sampling_step` verify hook, which arrives with the next SGLang
-  engine release. On the 0.1.0 SGLang engines temperature-1 requests use a greedy draft verified by the
-  target's sampler.
+  recorded probabilities) uses the engine's `sampling_step` verify hook, which the SGLang CUDA engine
+  `0.5.23.dev252+eagle.5` has. On the 0.1.0 SGLang engines and on ROCm, temperature-1 requests use a greedy draft
+  verified by the target's sampler.
   On every engine, a batch uses that path when any request has another temperature, a grammar or a penalty.
 - The shipped vLLM TP4 rounds schedule improves the measured concurrency-64 and concurrency-128 cases at a
   running cap of 64, at temperature 0 and 1; see the
   [support matrix](support-matrix.md#measured-high-load-tree-schedule). The schedule has no TP1/TP8 profile.
   Running caps of 128 and above are being qualified. Native-OFF is off by default while its TP1 throughput is
   optimized to match native decoding.
+- vLLM TP4 at concurrency 64: in a 64-prompt greedy comparison against no-spec, one prompt can take another token
+  at one position, up to 5.4 bf16 ULP from the fp32 choice, beyond the 2-ULP rule. It appeared in 3 of 6 EAGLE-4
+  starts with 0.1.1 and in 2 of 6 with 0.1.0 (the vLLM engine is the same); the other prompts and every
+  twenty-prompt check at concurrency 1 pass. The cause is being investigated.
 - AMD measurements apply to the MI355X TP1 Qwen3.8 profile. On one MI355X the speedup covers concurrency up
   to 32; concurrency 64 is being optimized, so serve it without speculation for now. HIP side-stream prelaunch
   stays off: its replay check passes and it measured no throughput gain on MI355X. Further target, draft and
@@ -84,8 +90,8 @@ key does not encode every setting. A cache or table is not evidence of an optima
 
 The vLLM public sweep measures batch-one tree forwards, not complete high-concurrency serving rounds.
 The SGLang served-chain driver measures a separate path from dynamic-tree calibration. Its CLI uses the
-per-variant native-decode graphs that arrive with the next SGLang engine release; live-cost tree serving runs on
-the current engine. Built-in smoke prompts check the command, not representative acceptance. An interrupted
+per-variant native-decode graphs of the SGLang CUDA engine `0.5.23.dev252+eagle.5`; live-cost tree serving runs on
+both CUDA engines. Built-in smoke prompts check the command, not representative acceptance. An interrupted
 run keeps its partial output for diagnosis and writes `serve.sh` only on success. See
 [calibration](calibration.md).
 
@@ -97,7 +103,8 @@ Hugging Face under their owners' licenses.
 
 - The published SGLang and vLLM images passed serving and correctness checks, and the published TokenSpeed image
   passed a GPU check in serve mode ([support matrix](support-matrix.md#artifact-installation-checks)). They carry
-  `eagle-harness` 0.1.0.
+  `eagle-harness` 0.1.0 and the 0.1.0 engines; images with 0.1.1 follow. Use the image commands in the engine guides
+  with them.
 - The files under `docker/` show how the release images are built. The checked CUDA images carry a prebuilt
   `eagle-harness` wheel, so the published images are the checked path. The TokenSpeed Dockerfile takes an
   explicit compatible `BASE_IMAGE`.

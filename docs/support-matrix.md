@@ -15,9 +15,9 @@ matched no-speculation control. [Reading the numbers](#reading-the-numbers) defi
 |---|---:|---:|---|---:|---:|---:|
 | 1 | 1 | 1 | Irrelevant at batch 1 | 103.1 | 343.1 | 3.33× |
 | 1 | 8 | 8 | Disabled in measurement | 711.7 | 1503.7 | 2.11× |
-| 4 | 1 | 32 | Irrelevant at batch 1 | 216.3 | 735.7 | 3.40× |
-| 4 | 8 | 32 | Default, enabled | 1479.4 | 2820.6 | 1.91× |
-| 4 | 64 | 32 | Disabled in measurement | 3925.3 | 5281.3 | 1.35× |
+| 4 | 1 | 32 | Irrelevant at batch 1 | 218.5 | 750.6 | 3.44× |
+| 4 | 8 | 32 | Default, enabled | 1541.7 | 3203.1 | 2.08× |
+| 4 | 64 | 32 | Default, enabled | 4655.3 | 6454.1 | 1.39× |
 | 8 | 1 | 1 | Irrelevant at batch 1 | 241.7 | 828.6 | 3.43× |
 
 ### B300 SGLang measurement conditions
@@ -28,13 +28,13 @@ Concurrency 1 uses 22 conversations and 31 turns with at most 1024 new tokens pe
 88 first turns with at most 512 new tokens. Concurrency 64 uses 220 first turns with the same 512-token cap.
 Every timed pass follows a warm pass. EAGLE-4 measures live costs. Each EAGLE-4 configuration has two starts.
 
-TP4 concurrency 1 measures the released stack: `sglang==0.5.23.dev252+eagle.4` from the CUDA wheel index and
-`eagle-harness==0.1.0` from PyPI, installed into a clean environment and served by the SGLang quickstart command
-from a directory outside any checkout. It has six EAGLE-4 starts (725.2 to 752.7 tokens/s) and three no-spec
-starts, interleaved in one allocation. Every EAGLE-4 start gives 5 exact / 15 near tie / 0 fp32 / 0 failed in its
-twenty-prompt check.
-
-TP4 concurrency 8 measures 2749.5 and 2891.8 tokens/s across its two starts.
+The TP4 rows measure the 0.1.1 release stack: `sglang==0.5.23.dev252+eagle.5` and `eagle-harness` 0.1.1,
+installed by the install guide's SGLang commands into a clean environment and served by the guide's tuned SGLang
+command from a directory outside any checkout. Three EAGLE-4 starts and one no-spec start ran interleaved in one
+allocation; EAGLE-4 measured 750.2 to 751.3 tokens/s at concurrency 1, 3183.1 to 3237.0 at concurrency 8 and
+6273.7 to 6591.8 at concurrency 64. Every EAGLE-4 start gives 4 exact / 16 near tie / 0 failed in its
+twenty-prompt check. At temperature 1 the same starts measure 597.3, 2741.8 and 5752.2 tokens/s at concurrency 1,
+8 and 64, 2.76×, 1.75× and 1.22× the no-spec control at temperature 1.
 TP8 concurrency 1 and 8 each give 5 exact / 14 near tie / 1 fp32-tolerance pass, with zero failures
 in the configuration-specific twenty-prompt checks. TP8 concurrency-8 throughput variability is being investigated.
 
