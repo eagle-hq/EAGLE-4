@@ -37,7 +37,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[test]"
 ```
 
-Install SGLang, vLLM or experimental TokenSpeed with the eagle-harness hooks ([Compatibility](docs/compatibility.md)) to run that engine's
+Install SGLang, vLLM or TokenSpeed with the eagle-harness hooks ([Compatibility](docs/compatibility.md)) to run that engine's
 tests. Each engine's tests skip without it.
 
 ## Test

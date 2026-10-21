@@ -6,7 +6,7 @@ last_verified: 2026-10-21
 
 # vLLM guide
 
-Serve Qwen3.8-27B with its EAGLE-4 draft on four NVIDIA GPUs with vLLM. The first server uses a fixed tree and
+Serve Qwen3.8-27B and its EAGLE-4 draft with vLLM. The first server uses a fixed tree and
 needs no preparation. The measured recipe adds cost tables you calibrate once and a packaged schedule that
 narrows the tree at high load.
 
@@ -16,7 +16,7 @@ Install the engine with the [vLLM install command](install.md#vllm-cuda), then s
 draft download from Hugging Face on the first start:
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3.8-27B --tensor-parallel-size 4 \
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3.8-27B \
   --attention-backend CUSTOM --linear-backend flashinfer_cutedsl \
   --speculative-config '{"method": "eagle_harness", "model": "EAGLE-Corp/Qwen3.8-27B-EAGLE4", "method_config": {"mode": "static", "node_top_k": 4, "tree_depth": 14, "max_verify_width": 16}}'
 ```
@@ -26,11 +26,13 @@ Or run the published image, which has the engine and EAGLE-4 installed and start
 ```bash
 docker run --gpus all --ipc host -p 127.0.0.1:8000:8000 \
   -e HF_HOME=/hf -v ~/.cache/huggingface:/hf -e VLLM_USE_V2_MODEL_RUNNER=1 \
-  ghcr.io/eagle-hq/eagle-4-vllm:0.1.0 \
-  Qwen/Qwen3.8-27B --tensor-parallel-size 4 \
+  ghcr.io/eagle-hq/eagle-4-vllm:0.1.1 \
+  Qwen/Qwen3.8-27B \
   --attention-backend CUSTOM --linear-backend flashinfer_cutedsl \
   --speculative-config '{"method": "eagle_harness", "model": "EAGLE-Corp/Qwen3.8-27B-EAGLE4", "method_config": {"mode": "static", "node_top_k": 4, "tree_depth": 14, "max_verify_width": 16}}'
 ```
+
+Both commands serve on one GPU. Add `--tensor-parallel-size 4` to serve on four, as the measured recipe below does.
 
 The tree drafts 14 steps with 4 candidates per step and verifies 16 tokens. Tree verification needs vLLM's Model
 Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`) and the `CUSTOM` attention backend, and an unquantized KV cache.
@@ -48,10 +50,10 @@ The response holds the generated message. Send a few requests before you measure
 
 ## The measured recipe
 
-The TP4 vLLM rows of the [support matrix](support-matrix.md#vllm-on-nvidia-b300) stop the tree early when another
+The TP4 vLLM rows of the [support matrix](support-matrix.md#011-speed-by-engine-and-concurrency) stop the tree early when another
 draft step costs more than it gains, from cost tables measured on your GPUs. At 20 or more running requests the
 packaged rounds file narrows the verified tokens from 16 to 4
-([high-load rows](support-matrix.md#measured-high-load-tree-schedule)). Both live in one directory.
+([high-load rows](support-matrix.md#010-high-load)). Both live in one directory.
 
 Stop any server on these GPUs, then calibrate once and add the rounds file:
 

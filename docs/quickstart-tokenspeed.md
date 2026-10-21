@@ -4,19 +4,18 @@ owner: eagle-harness
 last_verified: 2026-10-21
 ---
 
-# TokenSpeed guide, experimental
+# TokenSpeed guide
 
-Serve Qwen3.8-27B with its EAGLE-4 draft on four NVIDIA GPUs with TokenSpeed. TokenSpeed support is experimental
-and runs on NVIDIA GPUs only. Its measured cost-model mode needs cost tables that EAGLE-4 does not ship yet, so the
-first server below uses a static tree to check that generation works.
+Serve Qwen3.8-27B and its EAGLE-4 draft with TokenSpeed on NVIDIA GPUs. Its measured cost-model mode needs cost
+tables that EAGLE-4 does not ship yet, so the first server below uses a static tree to check that generation works.
 
 ## Start a server
 
-Install the engine with the [TokenSpeed install command](install.md#tokenspeed-cuda-experimental), then start a
+Install the engine with the [TokenSpeed install command](install.md#tokenspeed-cuda), then start a
 server with a static tree:
 
 ```bash
-tokenspeed serve Qwen/Qwen3.8-27B --tensor-parallel-size 4 \
+tokenspeed serve Qwen/Qwen3.8-27B --disable-kvstore \
   --attention-backend trtllm --max-model-len 65536 --sampling-backend greedy \
   --speculative-algorithm EAGLE_HARNESS \
   --speculative-draft-model-path EAGLE-Corp/Qwen3.8-27B-EAGLE4 \
@@ -24,9 +23,13 @@ tokenspeed serve Qwen/Qwen3.8-27B --tensor-parallel-size 4 \
   --speculative-algorithm-config '{"mode": "static"}'
 ```
 
+The command serves on one GPU. `--disable-kvstore` turns off TokenSpeed's host-memory KV cache tier, which by
+default pins twice the GPU's KV cache in host memory; the measured recipe turns it off too. Add
+`--tensor-parallel-size 4` to serve on four, as the measured recipe below does.
+
 Static mode drafts the full tree every round, without a cost model. Its twenty-prompt greedy check has one
 first divergence above the fp32 gate, so it checks setup rather than correctness
-([known limits](known-limits.md#tokenspeed-experimental)). `--sampling-backend greedy` is required, because
+([known limits](known-limits.md#tokenspeed)). `--sampling-backend greedy` is required, because
 draft trees are verified by the greedy and triton sampling backends.
 
 ## Send a request
@@ -41,7 +44,7 @@ On Ubuntu 26.04 / glibc 2.43, set `CUDA_HOME=/usr/local/cuda-13.2` first ([troub
 
 ## The measured recipe
 
-The TokenSpeed rows of the [support matrix](support-matrix.md#tokenspeed-experimental) use serve mode, where the
+The TokenSpeed rows of the [support matrix](support-matrix.md#011-speed-by-engine-and-concurrency) use serve mode, where the
 cost model sizes every round from cost tables measured for TokenSpeed on B300 at TP4. Set `COST_ROOT` to a
 directory whose `cost/` folder holds such tables. vLLM and ROCm tables are not substitutes.
 
@@ -63,4 +66,4 @@ fp32-tolerance results. These are first-divergence checks, not bitwise output eq
 qualification.
 
 Prompt logprobs, per-request sampled trees, live cost measurement and native no-speculation rounds are not
-supported. The [known limits](known-limits.md#tokenspeed-experimental) list the rest.
+supported. The [known limits](known-limits.md#tokenspeed) list the rest.

@@ -6,7 +6,7 @@ last_verified: 2026-10-21
 
 # SGLang guide
 
-Serve Qwen3.8-27B with its EAGLE-4 draft on four NVIDIA GPUs. SGLang prices the draft tree from costs it
+Serve Qwen3.8-27B and its EAGLE-4 draft with SGLang. SGLang prices the draft tree from costs it
 measures on the served rounds, so nothing needs calibrating first. For MI355X, use the [AMD guide](quickstart-amd.md).
 
 ## Start a server
@@ -15,7 +15,7 @@ Install the engine with the [SGLang install command](install.md#sglang-cuda), th
 the draft download from Hugging Face on the first start:
 
 ```bash
-sglang serve --model-path Qwen/Qwen3.8-27B --tp-size 4 \
+sglang serve --model-path Qwen/Qwen3.8-27B \
   --speculative-algorithm EAGLE_HARNESS \
   --speculative-draft-model-path EAGLE-Corp/Qwen3.8-27B-EAGLE4
 ```
@@ -25,20 +25,22 @@ Or run the published image, which has the engine and EAGLE-4 installed:
 ```bash
 docker run --gpus all --ipc host -p 127.0.0.1:30000:30000 \
   -e HF_HOME=/hf -v ~/.cache/huggingface:/hf \
-  ghcr.io/eagle-hq/eagle-4-sglang:0.1.0 \
-  sglang serve --model-path Qwen/Qwen3.8-27B --tp-size 4 --host 0.0.0.0 \
+  ghcr.io/eagle-hq/eagle-4-sglang:0.1.1 \
+  sglang serve --model-path Qwen/Qwen3.8-27B --host 0.0.0.0 \
   --disable-overlap-schedule --speculative-algorithm EAGLE_HARNESS \
   --speculative-draft-model-path EAGLE-Corp/Qwen3.8-27B-EAGLE4 \
   --speculative-num-steps 12 --speculative-eagle-topk 4 --speculative-num-draft-tokens 16 \
   --speculative-algorithm-config '{}'
 ```
 
+Both commands serve on one GPU. Add `--tp-size 4` to serve on four, as the measured recipe below does.
+
 By default EAGLE-4 drafts a tree of up to 12 steps with 4 candidates per step, verifies up to 16 tokens, and
 prices every round from live costs. `--speculative-num-steps`, `--speculative-eagle-topk`,
 `--speculative-num-draft-tokens` and `--speculative-algorithm-config` override those
-([configuration](configuration.md)). These defaults need `eagle-harness` 0.1.1 or newer. The image carries 0.1.0,
-so its command spells them out and adds `--disable-overlap-schedule`. From 0.1.1, EAGLE-4 serves with SGLang's
-default overlap scheduler.
+([configuration](configuration.md)). These defaults need `eagle-harness` 0.1.1 or newer, which the image carries.
+The image command spells the same settings out and adds `--disable-overlap-schedule`; EAGLE-4 also serves with
+SGLang's default overlap scheduler.
 
 ## Send a request
 
@@ -54,7 +56,7 @@ few before you measure speed. Compare against the same engine without the `--spe
 
 ## The measured recipe
 
-The SGLang rows of the [support matrix](support-matrix.md#sglang-on-nvidia-b300) were measured with this command.
+The SGLang rows of the [support matrix](support-matrix.md#011-speed-by-engine-and-concurrency) were measured with this command.
 It adds the attention backends, graph settings, memory sizes and recurrent-state dtype of the benchmark:
 
 ```bash

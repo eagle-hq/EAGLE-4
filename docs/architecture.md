@@ -43,7 +43,7 @@ vLLM runs the method on its Model Runner V2. The plugin uses its speculative-met
 `prepare_verify_inputs`, `make_rejection_sampler` and `post_accept`, the linear-attention verify extension for GDN
 layers, and the `CUSTOM` attention backend slot.
 
-Experimental TokenSpeed runs the method as a drafter on its plugin registries. The plugin uses `register_drafter` and
+TokenSpeed runs the method as a drafter on its plugin registries. The plugin uses `register_drafter` and
 `register_model` and generic hooks of the pinned TokenSpeed release build: the method's JSON
 config (`--speculative-algorithm-config`, delivered to `BaseDrafter.configure_algorithm`), the target's aux hidden
 states for a plugin algorithm, and tree drafting by a plugin drafter. That build lets a plugin draft bind its
@@ -76,7 +76,7 @@ prepare the next round.
    path plus one bonus token from the target are committed. Verification uses target scores at the accepted prefix.
    This describes the algorithm, not proof of distribution equivalence or exact no-spec output on every
    implementation and model. Different verification shapes can change target arithmetic, including cases outside
-   the near-tie gate. Check the [measured correctness coverage](support-matrix.md#correctness-and-request-features).
+   the near-tie gate. Check the [measured correctness coverage](support-matrix.md#010-correctness-and-request-features).
    The accepted rows'
    KV and GDN states are moved to the request's chain positions.
 6. The draft extend runs the draft over the accepted tokens, which updates its KV cache and yields the next round's
@@ -90,7 +90,8 @@ uses the forward stream so the engine can relay the draft outputs in order.
 
 ## TokenSpeed
 
-The TokenSpeed adapter is experimental. The paths below describe implementation, not qualification for every workload.
+The paths below describe the implementation. The [support matrix](support-matrix.md) lists the measured TokenSpeed
+configurations.
 
 TokenSpeed's tree attention, GDN tree verification, accept walk and accepted-path compaction serve both adapter modes.
 In static mode the target forward, acceptance and all draft steps replay as one decode CUDA graph.

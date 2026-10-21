@@ -51,24 +51,29 @@
 
 EAGLE-4 (Extrapolation Algorithm for Greater Language-model Efficiency) speeds up LLM inference with speculative
 decoding. One draft model adapts its draft tree to the batch size, the hardware and the workload, and keeps the
-target model's output distribution. On four B300 GPUs it serves Qwen3.8-27B 3.40× faster than SGLang without
+target model's output distribution. On four B300 GPUs it serves Qwen3.8-27B 3.42× faster than SGLang without
 speculation for one request at a time.
 
 This repository is `eagle-harness`, the package that runs EAGLE-4 drafts inside SGLang, vLLM and TokenSpeed.
 
+**Note that an EAGLE-4 draft model is only one component of EAGLE-4 and does not represent the complete system
+on its own. It must be combined with EAGLE-Harness to form the full EAGLE-4 system.**
+
 ## Quick start
 
-You need Linux, four NVIDIA GPUs with a CUDA 13 driver (tested on B300) and about 70 GB of disk for
+The quick start serves on one GPU and is tested on one NVIDIA B300 with Linux and a CUDA 13 driver.
 [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) and its
-[EAGLE-4 draft](https://huggingface.co/EAGLE-Corp/Qwen3.8-27B-EAGLE4), which download on the first start.
+[EAGLE-4 draft](https://huggingface.co/EAGLE-Corp/Qwen3.8-27B-EAGLE4) download on the first start (about 62 GB).
+The [measured speedups](#measured-speedup) use four B300 GPUs. Add `--tp-size 4` to either serve command to serve
+on four, and see the [engine guides](#more) for the exact measured commands.
 
 Start an SGLang server with Docker:
 
 ```bash
 docker run --gpus all --ipc host -p 127.0.0.1:30000:30000 \
   -e HF_HOME=/hf -v ~/.cache/huggingface:/hf \
-  ghcr.io/eagle-hq/eagle-4-sglang:0.1.0 \
-  sglang serve --model-path Qwen/Qwen3.8-27B --tp-size 4 --host 0.0.0.0 \
+  ghcr.io/eagle-hq/eagle-4-sglang:0.1.1 \
+  sglang serve --model-path Qwen/Qwen3.8-27B --host 0.0.0.0 \
   --disable-overlap-schedule --speculative-algorithm EAGLE_HARNESS \
   --speculative-draft-model-path EAGLE-Corp/Qwen3.8-27B-EAGLE4 \
   --speculative-num-steps 12 --speculative-eagle-topk 4 --speculative-num-draft-tokens 16 \
@@ -86,7 +91,7 @@ pip install "eagle-harness[sglang]" "sglang==0.5.23.dev252+eagle.5" \
 ```
 
 ```bash
-sglang serve --model-path Qwen/Qwen3.8-27B --tp-size 4 \
+sglang serve --model-path Qwen/Qwen3.8-27B \
   --speculative-algorithm EAGLE_HARNESS \
   --speculative-draft-model-path EAGLE-Corp/Qwen3.8-27B-EAGLE4
 ```
@@ -98,7 +103,7 @@ curl http://localhost:30000/v1/chat/completions -H 'Content-Type: application/js
   -d '{"model": "Qwen/Qwen3.8-27B", "messages": [{"role": "user", "content": "Explain how a hash table works."}], "max_tokens": 256}'
 ```
 
-For vLLM, TokenSpeed (experimental) and AMD MI355X, follow the [engine guides](#more).
+For vLLM, TokenSpeed and AMD MI355X, follow the [engine guides](#more).
 
 ## Measured speedup
 
@@ -108,9 +113,9 @@ temperature 0 on the SPEED-Bench client, with the measured recipe of each engine
 
 | Engine | GPUs | 1 request | 8 concurrent | 64 concurrent |
 | --- | --- | ---: | ---: | ---: |
-| SGLang | 4× B300 | 3.40× | 1.91× | 1.35× |
-| vLLM | 4× B300 | 2.99× | 1.70× | 1.16× |
-| TokenSpeed, experimental | 4× B300 | not measured | 2.02× | 1.42× |
+| SGLang | 4× B300 | 3.42× | 2.09× | 1.39× |
+| vLLM | 4× B300 | 2.83× | 1.72× | 1.14× |
+| TokenSpeed | 4× B300 | 3.09× | 2.02× | 1.41× |
 
 On one AMD MI355X, SGLang with EAGLE-4 is 2.07× faster at 8 concurrent requests and 1.56× at 32.
 
@@ -118,7 +123,7 @@ On one AMD MI355X, SGLang with EAGLE-4 is 2.07× faster at 8 concurrent requests
 
 - [Install](docs/install.md): pins, wheel indexes, Docker images and the ROCm closure.
 - Engine guides with the measured recipes: [SGLang](docs/quickstart-sglang.md), [vLLM](docs/quickstart-vllm.md),
-  [TokenSpeed, experimental](docs/quickstart-tokenspeed.md), [AMD MI355X](docs/quickstart-amd.md).
+  [TokenSpeed](docs/quickstart-tokenspeed.md), [AMD MI355X](docs/quickstart-amd.md).
 - [Support matrix](docs/support-matrix.md) and [known limits](docs/known-limits.md).
 - [Calibration](docs/calibration.md), [configuration](docs/configuration.md) and
   [troubleshooting](docs/troubleshooting.md).

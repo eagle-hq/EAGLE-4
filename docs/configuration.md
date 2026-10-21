@@ -99,7 +99,7 @@ Chains on vLLM: leave the target on vLLM's default attention backend and give on
 multi-head EAGLE-4 draft on the 128-token pages a hybrid target needs, and `--attention-backend FLASH_ATTN` moves the
 whole target off FlashInfer. Keep the target backend unchanged for a matched speculation comparison.
 
-TokenSpeed is experimental. It takes the draft shape from its server arguments. `"mode": "serve"` is the default, as on
+TokenSpeed takes the draft shape from its server arguments. `"mode": "serve"` is the default, as on
 the other engines: it uses calibrated GPU-side decisions to stop drafting and select meaningful verify nodes, and needs
 `data_path` unless a complete `chain_width_table` (from batch size 1) sets every width. Without a usable config the
 server refuses to start. `"mode": "static"` uses every configured draft step and needs no cost data.

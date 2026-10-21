@@ -5,8 +5,8 @@
 Replaces the torch chain of :func:`eagle_harness.core.sampled_tree.draw_children` (softmax, rand, two logs, two
 top-k, gather, five slice copies) and the per-step TP broadcast of its uniforms. The uniforms come from counter-based
 Philox keyed by ``(seed, round, launch, element)``: every TP rank holds the same seed (sglang broadcasts
-``random_seed``) and replays the same graphs, so every rank draws the same tree without a collective, as the
-EAGLE-4 fork does. With ``uniforms`` given (tests), the draw equals :func:`draw_children`'s on the same uniforms.
+``random_seed``) and replays the same graphs, so every rank draws the same tree without a collective. With
+``uniforms`` given (tests), the draw equals :func:`draw_children`'s on the same uniforms.
 """
 
 from __future__ import annotations

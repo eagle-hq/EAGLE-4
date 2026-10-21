@@ -7,14 +7,14 @@ last_verified: 2026-10-21
 # EAGLE-4 documentation
 
 To serve a model with EAGLE-4, install one engine and follow its guide. SGLang needs no preparation, vLLM
-reaches its measured speed after a one-time calibration, and TokenSpeed is experimental.
+reaches its measured speed after a one-time calibration, and TokenSpeed runs on NVIDIA GPUs.
 
 | Task | Guide |
 |---|---|
 | Install an engine with pip, or pick a Docker image | [Install](install.md) |
 | Serve on SGLang | [SGLang guide](quickstart-sglang.md) |
 | Serve on vLLM | [vLLM guide](quickstart-vllm.md) |
-| Serve on TokenSpeed, experimental | [TokenSpeed guide](quickstart-tokenspeed.md) |
+| Serve on TokenSpeed | [TokenSpeed guide](quickstart-tokenspeed.md) |
 | Serve on AMD MI355X | [AMD guide](quickstart-amd.md) |
 | See measured speed and correctness | [Support matrix](support-matrix.md) |
 | Check unsupported or unmeasured behavior | [Known limits](known-limits.md) |

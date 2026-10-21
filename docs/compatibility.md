@@ -18,7 +18,7 @@ packages include the hooks or that every configuration in the range has been mea
 | SGLang CUDA | `>=0.5.23.dev0,<0.6` with hooks | `EAGLE_SGLANG_VERSION` in release settings |
 | SGLang ROCm | SGLang hooks plus the ROCm verification integration | `EAGLE_ROCM_VERSION`, [AMD recipe](quickstart-amd.md) |
 | vLLM | `>=0.32.0rc1.dev283,!=0.32.0` with hooks and Model Runner V2 | `EAGLE_VLLM_VERSION` |
-| TokenSpeed, experimental | `>=0.1.1,<0.2` with hooks and matching native packages | `EAGLE_TOKENSPEED_VERSION` and `EAGLE_TOKENSPEED_AUX_REQUIREMENTS` |
+| TokenSpeed | `>=0.1.1,<0.2` with hooks and matching native packages | `EAGLE_TOKENSPEED_VERSION` and `EAGLE_TOKENSPEED_AUX_REQUIREMENTS` |
 | FlashInfer, CUDA SGLang | `>=0.7.2` | CUDA installation, not ROCm |
 | Python | Package metadata allows 3.10 and newer | CUDA recipes use 3.12, the ROCm wheel requires 3.10 |
 | PyTorch and GPU runtime | Match the engine's dependency closure | [CUDA and ROCm requirements](install.md#requirements) |

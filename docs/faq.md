@@ -24,8 +24,8 @@ so only the draft depth adapts per round.
 
 When no `data_path` is supplied, SGLang selects a matching packaged MI355X profile if available, otherwise
 it measures costs on served rounds. Offline tables remain an option.
-vLLM static trees need no tables, while automatic policies require matching measured costs. Experimental
-TokenSpeed needs offline costs for calibrated decisions, or a complete explicit chain schedule.
+vLLM static trees need no tables, while automatic policies require matching measured costs. TokenSpeed
+needs offline costs for calibrated decisions, or a complete explicit chain schedule.
 See [calibration](calibration.md).
 
 ## Does it patch sglang or vLLM?
@@ -72,7 +72,7 @@ do not establish distribution equivalence for every model and workload.
 
 Logprobs are supported on SGLang and vLLM. Each request gets the logprobs of its accepted tokens. SGLang
 input logprobs come from its prefill. Use the matching engine with the FlashInfer verify-wrapper graph fix.
-TokenSpeed is experimental and refuses prompt logprobs.
+TokenSpeed refuses prompt logprobs ([known limits](known-limits.md#tokenspeed)).
 
 Requests with images are refused with a reason on sglang.
 

@@ -14,7 +14,7 @@ containers, use a [published image](#docker-images) instead.
 ## Requirements
 
 - Linux x86-64 and Python 3.12. On Ubuntu, `python3.12 -m venv` needs the `python3.12-venv` package.
-- NVIDIA GPUs with a CUDA 13 driver. The measured recipes use B300 GPUs.
+- An NVIDIA GPU with a CUDA 13 driver. The quick starts are tested on one B300 and the measured recipes on four.
 - For pip installs, a CUDA toolkit with `nvcc` and a C++ compiler for kernels compiled on the first start.
   The driver alone is not enough. On Ubuntu 26.04 / glibc 2.43, use CUDA 13.2
   ([toolkit setup](troubleshooting.md#install-problems)). Docker images include their build tools.
@@ -43,7 +43,7 @@ pip install "eagle-harness[vllm]" "vllm==0.32.0rc1.dev283+eagle.4" \
 
 Then follow the [vLLM guide](quickstart-vllm.md).
 
-## TokenSpeed CUDA, experimental
+## TokenSpeed CUDA
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
@@ -74,14 +74,14 @@ wheel hash for the SGLang image build.
 
 ## Docker images
 
-Each image has one patched engine and `eagle-harness` 0.1.0 installed. The engine guides show the `docker run`
+Each image has one patched engine and `eagle-harness` 0.1.1 installed. The engine guides show the `docker run`
 command for each one.
 
 | Engine | Image |
 | --- | --- |
-| SGLang CUDA | `ghcr.io/eagle-hq/eagle-4-sglang:0.1.0` |
-| vLLM CUDA | `ghcr.io/eagle-hq/eagle-4-vllm:0.1.0` |
-| TokenSpeed CUDA, experimental | `ghcr.io/eagle-hq/eagle-4-tokenspeed:0.1.0` |
+| SGLang CUDA | `ghcr.io/eagle-hq/eagle-4-sglang:0.1.1` |
+| vLLM CUDA | `ghcr.io/eagle-hq/eagle-4-vllm:0.1.1` |
+| TokenSpeed CUDA | `ghcr.io/eagle-hq/eagle-4-tokenspeed:0.1.1` |
 | SGLang ROCm | not published, [build it](#build-the-rocm-image) |
 
 To run a newer `eagle-harness` in an image, run `pip install -U eagle-harness` inside the container.

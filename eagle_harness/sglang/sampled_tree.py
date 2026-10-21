@@ -16,8 +16,8 @@ class SampledTree:
 
     Draws come from counter-based Philox keyed by the TP-synchronized seed, a
     device round counter advanced by the root draw's graph and the draft step,
-    so every TP rank draws the same tree with no collective (the EAGLE-4 fork's
-    scheme). One Triton launch per draft step records q and draws the children.
+    so every TP rank draws the same tree with no collective. One Triton launch
+    per draft step records q and draws the children.
     """
 
     def __init__(self, tree, candidates: int, seed: int = 0, *, req_index=None, rows: int = 0):
