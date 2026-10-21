@@ -77,6 +77,7 @@ def main(root: Path, artifacts: list[Path], base_url: str | None = None) -> None
         meta = metadata(f)
         projects.setdefault(normalize(meta["name"]), []).append((f, meta, sha256(f)))
     simple = root / "simple"
+    simple.mkdir(parents=True, exist_ok=True)  # the root page is written even before any artifact is staged
     for project, entries in projects.items():
         lines = [
             f"<!DOCTYPE html>\n<html><head><title>Links for {project}</title></head><body>",
