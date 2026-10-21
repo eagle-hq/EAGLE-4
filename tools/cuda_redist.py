@@ -41,7 +41,10 @@ def install(release: str, home: Path) -> None:
                 with urllib.request.urlopen(BASE + entry["relative_path"]) as response:
                     shutil.copyfileobj(response, archive)
                 archive.seek(0)
-                digest = hashlib.file_digest(archive, "sha256").hexdigest()
+                sha = hashlib.sha256()  # not hashlib.file_digest: that needs Python 3.11, the package supports 3.10
+                for block in iter(lambda: archive.read(1 << 20), b""):
+                    sha.update(block)
+                digest = sha.hexdigest()
                 if digest != entry["sha256"]:
                     raise SystemExit(f"{component}: sha256 {digest} != manifest {entry['sha256']}")
                 archive.seek(0)
