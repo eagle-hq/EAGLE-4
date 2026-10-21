@@ -57,6 +57,8 @@ logger = logging.getLogger(__name__)
 ALGORITHM_NAME = "EAGLE_HARNESS"
 # The draft attention backends the harness plans tree attention for.
 DRAFT_ATTENTION_BACKENDS = ("flashinfer", "fa3", "fa4")
+# --speculative-num-steps, --speculative-eagle-topk, --speculative-num-draft-tokens when none is set.
+DEFAULT_TREE_SHAPE = (12, 4, 16)
 # sglang's ROCm switches the measured AMD recipe depends on (read by sglang at import, never set here; the harness sets
 # only aiter's GEMM table, eagle_harness.core.gemm_solutions.serve_bf16_gemms_through_torch).
 ROCM_ENVIRONMENT = {
@@ -192,6 +194,18 @@ class EagleHarnessSpecAlgo(CustomSpecAlgo):
             # Every spawned worker must see the same resolved path, without an environment overlay.
             server_args.speculative_algorithm_config = json.dumps(config_to_dict(config))
             logger.info("EAGLE_HARNESS: selected packaged MI355X cost profile %s", default_data_path)
+        shape = (
+            server_args.speculative_num_steps,
+            server_args.speculative_eagle_topk,
+            server_args.speculative_num_draft_tokens,
+        )
+        if shape == (None, None, None) and config.intensity is not ComputeIntensity.CHAIN:
+            # The release tree (depth 12, top-k 4, verify width 16), so a launch needs only the draft path.
+            (
+                server_args.speculative_num_steps,
+                server_args.speculative_eagle_topk,
+                server_args.speculative_num_draft_tokens,
+            ) = DEFAULT_TREE_SHAPE
         if server_args.speculative_num_steps is None or server_args.speculative_eagle_topk is None:
             raise ValueError(
                 "EAGLE_HARNESS needs --speculative-num-steps, --speculative-eagle-topk and "

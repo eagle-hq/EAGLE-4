@@ -159,18 +159,44 @@ def test_server_args_accept_eagle_harness_and_config(registered, overlap_off):
 @pytest.mark.parametrize(
     "overrides, error, message",
     [
-        ({"speculative_algorithm_config": None}, ValueError, "needs --speculative-algorithm-config"),
         ({"speculative_algorithm_config": '{"data_path": "/x", "bogus": 1}'}, ValueError, "unknown keys"),
         ({"speculative_eagle_topk": 9}, NotImplementedError, "topk"),
         ({"speculative_num_draft_tokens": 65}, NotImplementedError, "verify_num"),
         ({"max_running_requests": 513}, ValueError, "batch limit 512"),
         ({"speculative_num_steps": None, "speculative_eagle_topk": None}, ValueError, "num-steps"),
+        ({"speculative_num_draft_tokens": None}, ValueError, "num-draft-tokens"),
+        (
+            {
+                "speculative_algorithm_config": '{"intensity": "chain_intensity"}',
+                "speculative_num_steps": None,
+                "speculative_eagle_topk": None,
+                "speculative_num_draft_tokens": None,
+            },
+            ValueError,
+            "num-steps",
+        ),
         ({"speculative_token_map": "/x/map.pt"}, NotImplementedError, "token-map"),
     ],
 )
 def test_server_args_rejections(registered, overrides, error, message):
     with pytest.raises(error, match=message):
         handle_speculative_decoding(_server_args(**overrides))
+
+
+def test_draft_path_alone_gets_the_release_tree_and_live_costs(registered):
+    """With no config and no tree flags the launch serves the release recipe's tree with live costs."""
+    args = _server_args(
+        speculative_algorithm_config=None,
+        speculative_num_steps=None,
+        speculative_eagle_topk=None,
+        speculative_num_draft_tokens=None,
+    )
+    handle_speculative_decoding(args)
+    assert [
+        resolution_result(args, name)
+        for name in ("speculative_num_steps", "speculative_eagle_topk", "speculative_num_draft_tokens")
+    ] == [12, 4, 16]
+    assert parse_harness_config(args.speculative_algorithm_config).data_path is None
 
 
 @pytest.mark.parametrize(

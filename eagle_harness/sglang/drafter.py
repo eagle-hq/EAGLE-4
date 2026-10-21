@@ -621,4 +621,7 @@ class DynamicDrafter:
         seq_lens_cpu: Optional[torch.Tensor] = getattr(batch, "seq_lens_cpu", None)
         if seq_lens_cpu is not None:
             return sum(seq_lens_cpu.tolist()) // len(seq_lens_cpu)
-        return int(batch.seq_lens_sum) // len(batch.seq_lens)
+        if batch.seq_lens_sum is not None:
+            return int(batch.seq_lens_sum) // len(batch.seq_lens)
+        # The overlap scheduler drops both host mirrors; the requests still hold their lengths (lagging one round).
+        return sum(req.seqlen for req in batch.reqs) // len(batch.reqs)

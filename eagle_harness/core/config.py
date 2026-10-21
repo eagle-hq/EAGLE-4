@@ -242,14 +242,12 @@ def harness_config_from_dict(data: Mapping[str, Any]) -> HarnessConfig:
 
 
 def parse_harness_config(value: Optional[str], *, default_data_path: Optional[str] = None) -> HarnessConfig:
-    """Parse JSON or a JSON file, filling an absent data_path from a device-selected profile."""
+    """Parse JSON or a JSON file, filling an absent data_path from a device-selected profile.
+
+    No value is the default config (serve mode, costs measured on the served rounds).
+    """
     if value is None or not value.strip():
-        if default_data_path is not None:
-            return harness_config_from_dict({"data_path": default_data_path})
-        raise ValueError(
-            "EAGLE_HARNESS needs --speculative-algorithm-config (JSON or a path to JSON), "
-            'e.g. {"data_path": "<calibration dir>"} or {"mode": "static"}.'
-        )
+        return harness_config_from_dict({} if default_data_path is None else {"data_path": default_data_path})
     text = value.strip()
     if not text.startswith(("{", "[")):
         with open(os.path.expanduser(text), encoding="utf-8") as f:

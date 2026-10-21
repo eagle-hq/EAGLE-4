@@ -1,8 +1,8 @@
 # Configuration reference
 
 The method takes one JSON object. On sglang it goes in `--speculative-algorithm-config`, inline or as a path to a
-JSON file. On vLLM it goes in the `method_config` of `--speculative-config`. On TokenSpeed it goes in
-`--speculative-algorithm-config` (inline JSON). The adapters share the core configuration parser and add
+JSON file, and leaving the flag out means `{}`. On vLLM it goes in the `method_config` of `--speculative-config`.
+On TokenSpeed it goes in `--speculative-algorithm-config` (inline JSON). The adapters share the core configuration parser and add
 engine-specific keys and restrictions described below. Unknown keys are
 rejected with the list of valid keys, so a typo cannot fall back to a default silently.
 

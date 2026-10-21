@@ -44,12 +44,11 @@ no supported host installed (one of: sglang, vllm, tokenspeed)
 | message | cause | fix |
 |---|---|---|
 | `Unknown speculative algorithm name: EAGLE_HARNESS` (sglang), vLLM rejects the method `eagle_harness`, or TokenSpeed does not know the algorithm `EAGLE_HARNESS` | the plugin did not register | run `eagle-harness-check` and read the error the engine logged at startup |
-| `EAGLE_HARNESS needs --speculative-algorithm-config (JSON or a path to JSON), ...` | sglang got no config | pass `{}` (live costs), `{"data_path": "<calibration dir>"}` or `{"mode": "static"}` |
 | `Cost tables under ... were measured on another setup (stored vs this server): {...}` | `data_path` tables keyed for another GPU, TP size, model pair, engine build or dtype | calibrate for this setup, or drop `data_path` to measure the costs on the served rounds |
 | `TokenSpeed serve mode (the default) needs data_path or a complete explicit chain schedule ...` | serve mode, set explicitly or by default, with no cost tables and no complete chain schedule (TokenSpeed) | set `data_path` to matching TokenSpeed costs ([Calibration](calibration.md)); static mode is not a correctness-qualified substitute |
 | `config: unknown keys ['intensty']; valid keys are [...]` | a misspelt key | use a key from the list ([Configuration](configuration.md)) |
 | `mode: 'fast' is not one of static, serve, eval, calibrate.` | a bad value | use one of the listed values |
-| `EAGLE_HARNESS needs --speculative-num-steps, --speculative-eagle-topk and --speculative-num-draft-tokens ...` | sglang got no tree shape | pass all three |
+| `EAGLE_HARNESS needs --speculative-num-steps, --speculative-eagle-topk and --speculative-num-draft-tokens ...` | sglang got part of the tree shape, or a chain config without one | pass all three, or none of them for the default tree (depth 12, top-k 4, verify width 16) |
 | `max_running_requests=... exceeds the tree draft batch limit 512.` | the explicit request cap exceeds the supported range | set `--max-running-requests` to at most 512, and check that KV and recurrent-state memory can hold the requested batch |
 | `eagle-harness kernels are off: ... is older than NVIDIA sm_80 (A100).` | the GPU is outside the kernel tiers | use a supported GPU ([Kernels](kernels.md)) |
 | `page_size > 1 needs --speculative-draft-attention-backend flashinfer, fa3 or fa4 for EAGLE_HARNESS.` | the draft backend cannot serve paged KV | set one of those backends |

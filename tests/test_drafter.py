@@ -422,3 +422,12 @@ def test_a_bucket_the_cost_model_refuses_keeps_the_fixed_shape(caplog):
     with caplog.at_level("WARNING"):
         drafter._check_priced(1)  # the model has no table for bucket 1
     assert drafter._unpriced == {1} and "keeps the fixed draft shape" in caplog.text
+
+
+def test_average_context_reads_request_lengths_when_the_overlap_scheduler_drops_host_mirrors():
+    """Under the overlap scheduler a decode batch has neither seq_lens_cpu nor seq_lens_sum (first live-cost round)."""
+    reqs = [SimpleNamespace(seqlen=10), SimpleNamespace(seqlen=21)]
+    overlap = SimpleNamespace(reqs=reqs, seq_lens=torch.tensor([10, 21]), seq_lens_cpu=None, seq_lens_sum=None)
+    assert DynamicDrafter.average_context(overlap) == 15
+    synchronous = SimpleNamespace(reqs=reqs, seq_lens=torch.tensor([10, 21]), seq_lens_cpu=torch.tensor([12, 22]))
+    assert DynamicDrafter.average_context(synchronous) == 17

@@ -70,9 +70,9 @@ def test_options_removed_in_0_1_1_are_refused_by_name(raw, key):
         parse_harness_config(json.dumps({"data_path": "/x", **raw}))
 
 
-def test_rejects_missing_and_non_object():
-    with pytest.raises(ValueError, match="needs --speculative-algorithm-config"):
-        parse_harness_config(None)
+def test_absent_config_is_the_default_and_bad_json_is_rejected():
+    assert parse_harness_config(None) == parse_harness_config("{}") == HarnessConfig()
+    assert parse_harness_config("  ") == HarnessConfig()
     with pytest.raises(ValueError, match="JSON object"):
         parse_harness_config("[1, 2]")
     with pytest.raises(ValueError, match="not valid JSON"):
