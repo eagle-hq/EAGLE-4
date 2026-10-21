@@ -26,18 +26,21 @@ A loaded model, an admitted request cap or a compiled kernel does not establish 
   overhead and intermittent stalls remain unresolved. Repeated passes in one process are not
   independent server starts.
 - SGLang automatic high-load policy, fixed-chain improvements and sampled-tree improvements are not
-  qualified release defaults. High-load and Nemotron first divergences remain open, as does TP4
-  native-OFF arbitration. A release-engine cap-512 startup and request smoke passed, but it did not
-  establish high-load acceleration or concurrent correctness.
-- The shipped vLLM TP4 rounds schedule improves the measured greedy concurrency-64 case. The
-  [support matrix](support-matrix.md#measured-high-load-tree-schedule) retains its no-spec-control and
-  correctness limits. The schedule has no TP1/TP8 profile, and higher concurrency and temperature-1
-  throughput are not qualified by that greedy result. Native-OFF is disabled by default and does not
-  reach native-decode throughput in the measured TP1 cases.
+  qualified release defaults. High-load and Nemotron first divergences remain open. A release-engine cap-512
+  startup and request smoke passed, but it did not establish high-load acceleration or concurrent correctness.
+- SGLang native-OFF needs the engine's per-variant native-decode graphs. The 0.1.0 SGLang CUDA engine lacks
+  them, so EAGLE-4 refuses native-OFF on that engine.
+- The shipped vLLM TP4 rounds schedule improves the measured concurrency-64 and concurrency-128 cases at a
+  running cap of 64, at temperature 0 and 1; see the
+  [support matrix](support-matrix.md#measured-high-load-tree-schedule). The schedule has no TP1/TP8 profile.
+  A running cap of 128 and higher concurrency are not qualified. Native-OFF is disabled by default and does
+  not reach native-decode throughput in the measured TP1 cases.
 - vLLM can drop EAGLE-4 INFO messages during plugin registration. An absent schedule-load line is
   not proof that the schedule is inactive. See [troubleshooting](troubleshooting.md#slower-than-expected).
-- AMD measurements apply to the MI355X TP1 Qwen3.8 profile. HIP side-stream prelaunch stays disabled
-  because its replay check failed. Remaining target, draft and verify phase overheads are separate
+- AMD measurements apply to the MI355X TP1 Qwen3.8 profile. At concurrency 64 on one MI355X, a short
+  diagnostic measured EAGLE-4 at 2703.6 tokens/s against 2975.4 tokens/s for no-spec decoding, so
+  speculation is slower there. HIP side-stream prelaunch stays disabled: its replay check now passes, but it
+  measured no throughput gain on MI355X. Remaining target, draft and verify phase overheads are separate
   from the measured-profile throughput results.
 
 ## Requests
@@ -46,7 +49,9 @@ A loaded model, an admitted request cap or a compiled kernel does not establish 
   benchmark results. A cap of 512 is an admission limit, not a claim of acceleration or correctness at that load.
 - SGLang supports accepted-token and input logprobs with the required host hooks. Images are refused.
 - vLLM tree verification needs an unquantized KV cache. The target's sampling restrictions still apply.
-  Sampling smoke tests do not prove distribution equivalence on every workload.
+  Sampling smoke tests do not prove distribution equivalence on every workload. The vLLM sampled-distribution
+  check passes only for temperature 1 with top-p 1 and no top-k; other temperatures, top-k/top-p and
+  penalties are not qualified. vLLM refuses `min_p` and `logit_bias` with speculative decoding.
 - Structured output and tool calls require the model's engine parser. Raw tool syntax in text is not a structured
   response. A vLLM tree batch containing a grammar constraint emits only the root token per verify round,
   including unconstrained requests in that batch. Check finish reasons and validate the completed output.

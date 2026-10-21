@@ -19,9 +19,11 @@ separate CUDA and ROCm wheels. The `eagle-harness` wheels and source distributio
 not to the GitHub Release. Publishing the public release runs `publish.yml` with PyPI trusted publishing.
 
 Fresh CUDA environments installed the engine wheels and served real requests, and the `eagle-harness`
-wheel and source-distribution forms passed installation checks. Those checks used a private index,
-not the public URLs. The private SGLang image also passed serving and correctness checks. vLLM image qualification is pending.
-The public TokenSpeed image passed a GPU check in serve mode. The ROCm pip path below was clean-installed from the
+wheel and source-distribution forms passed installation checks. Those checks used a private index.
+Fresh installs of the SGLang and TokenSpeed CUDA wheels from the public index, with `eagle-harness` from PyPI,
+later served the measured results in the [support matrix](support-matrix.md). The published SGLang and vLLM
+images passed serving and correctness checks, and the published TokenSpeed image passed a GPU check in serve
+mode. The ROCm pip path below was clean-installed from the
 public indexes and inference-tested on an MI355X. No ROCm image is published, and its Docker recipe has not been
 container-qualified.
 Do not replace an unavailable artifact with the stock engine or an unpinned package.
@@ -250,8 +252,8 @@ The [troubleshooting guide](troubleshooting.md) covers hook failures and startup
 The files under `docker/` describe release image construction, not proof of tested image builds.
 The private CUDA image checks used a prebuilt `eagle-harness` wheel instead of the sketches' source install,
 so they do not qualify those Dockerfiles verbatim. The corrected SGLang TP4 image passed hook, dependency,
-request and twenty-prompt correctness checks. vLLM image qualification is pending, the TokenSpeed image
-passed a GPU check in serve mode, and ROCm has no published image or container qualification.
+request and twenty-prompt correctness checks. The published vLLM image passed the same checks, the TokenSpeed
+image passed a GPU check in serve mode, and ROCm has no published image or container qualification.
 The ROCm recipe pins its upstream base by digest and takes the downloaded locked wheels as a named
 build context. The TokenSpeed sketch requires an explicit compatible `BASE_IMAGE`.
 Do not infer container qualification from a successful pip installation or syntax check.

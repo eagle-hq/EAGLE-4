@@ -82,10 +82,11 @@ every version pin, index URL and image tag. The wheels are also attached to the
 The [support matrix](docs/support-matrix.md) reports every measurement with its conditions, separately for
 loading, greedy correctness, request features and throughput. Throughput is generated tokens per second of
 workload time, higher is better. The rows below are the shapes the quickstarts ship. Each one is the mean of
-two server starts on the SPEED-Bench client at temperature 0.
+at least two server starts on the SPEED-Bench client at temperature 0.
 
 | Engine | GPUs | Client concurrency | No-spec tokens/s | EAGLE-4 tokens/s | Speedup |
 | --- | --- | ---: | ---: | ---: | ---: |
+| SGLang | 4× B300, TP4 | 1 | 216.3 | 735.7 | 3.40× |
 | SGLang | 4× B300, TP4 | 8 | 1479.4 | 2820.6 | 1.91× |
 | SGLang | 4× B300, TP4 | 64 | 3925.3 | 5281.3 | 1.35× |
 | SGLang | 1× MI355X, TP1 | 8 | 552.7 | 1145.9 | 2.07× |
@@ -94,8 +95,9 @@ two server starts on the SPEED-Bench client at temperature 0.
 | vLLM | 4× B300, TP4 | 8 | 1699.9 | 2883.9 | 1.70× |
 
 Each speedup divides EAGLE-4 throughput by the same engine's matched no-speculation control.
-No TokenSpeed throughput is claimed. An unexplained greedy mismatch fails the correctness gate even when the
-speculative server is faster.
+TokenSpeed is experimental; its measured concurrent throughput is in the
+[support matrix](docs/support-matrix.md#tokenspeed-experimental). An unexplained greedy mismatch fails the
+correctness gate even when the speculative server is faster.
 
 ## Install
 

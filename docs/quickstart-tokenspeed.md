@@ -58,8 +58,8 @@ python -m tokenspeed.cli serve "$MODEL" --tensor-parallel-size 4 \
 
 The running-request cap is four in the single-client release recipe. The concurrent release recipe
 uses `--max-num-seqs 32` with the same TP4 and context settings. Neither setting promises a speedup
-for your workload. A TokenSpeed release image has not been built or qualified.
-When a qualified image is available, bind the server to `0.0.0.0` inside the container and keep the published host port on loopback.
+for your workload. The published TokenSpeed image passed a GPU check in serve mode.
+Inside the image, bind the server to `0.0.0.0` and keep the published host port on loopback.
 If using cost files in Docker, mount their directory read-only and set `COST_ROOT` to that container path.
 
 ## Generate text
