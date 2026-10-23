@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.2 (2026-10-23)
+
+
+### Bug fixes
+
+* **sglang:** decode natively wherever the served tree or chain would be slower than plain decoding, chosen from whole served intervals under the same load
+* **sglang:** speculate without measuring native decode where speculation clearly wins, and check native decode's estimate only where the policy has one
+* **sglang:** compile every KV-move program a tree round runs before serving, and keep rounds that stalled on one-time work or followed a switch out of the policy's prices
+* **vllm:** `eagle-harness calibrate --engine vllm` completes: the calibration token budget fits one batch, tables are keyed by the engine's resolved models, and `serve.sh` loads them
+
+
+### Performance
+
+* **sglang:** start served trees and chains from packaged choices on the measured B300 setup
+* **tokenspeed:** project the candidate head through the engine linear
+
 ## 0.1.1 (2026-10-21)
 
 
