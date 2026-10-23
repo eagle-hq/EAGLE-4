@@ -88,3 +88,35 @@ def test_chunk_records_and_commit(width, batch, seed):
         before = committed.clone()
         gdn_tree_records_commit(committed, rec.unsqueeze(0), slots, rows, -torch.ones_like(accepted), parent, False)
         assert torch.equal(committed, before)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required (portable Triton: CUDA runs it too)")
+def test_commit_layer_offsets_past_2_31_elements():
+    """One launch commits every layer. At TP1 batch 64 the pool passes 2**31 elements, where a 32-bit layer offset
+    wraps and the last layers' commits land outside their layer (C64 MI355X parity failures, #65)."""
+    from eagle_harness.kernels.gdn_tree_records import gdn_tree_records_commit
+
+    device = torch.device("cuda")
+    heads, dim, slots = 8, 128, 8193
+    layer = slots * heads * dim * dim  # below 2**31; the third layer starts past it
+    assert layer < 2**31 <= 2 * layer
+    if torch.cuda.mem_get_info(device)[0] < 4 * layer * 2 + (1 << 30):
+        pytest.skip("needs about 9 GB of free GPU memory")
+    # The pool sits behind a guard one layer long, where a wrapped layer offset lands.
+    pool = torch.zeros(4 * layer, dtype=torch.bfloat16, device=device)
+    guard, state = pool[:layer], pool[layer:].view(3, slots, heads, dim, dim)
+    slot = slots - 1
+    gen = torch.Generator(device=device).manual_seed(5)
+    before = torch.randn(3, heads, dim, dim, generator=gen, device=device).to(torch.bfloat16)
+    state[:, slot] = before
+    records = torch.randn(3, 1, 1, heads, 2 * dim + 4, generator=gen, device=device)
+    records[..., 2 * dim] = torch.rand(3, 1, 1, heads, generator=gen, device=device)
+    one = torch.ones(1, dtype=torch.int32, device=device)
+    root = torch.zeros(1, 1, dtype=torch.int32, device=device)
+    gdn_tree_records_commit(state, records, one * slot, one * 0, one * 0, root, False)
+
+    delta, key, decay = records[:, 0, 0, :, :dim], records[:, 0, 0, :, dim : 2 * dim], records[:, 0, 0, :, 2 * dim]
+    want = before.float() * decay[..., None, None] + delta[..., :, None] * key[..., None, :]
+    torch.testing.assert_close(state[:, slot].float(), want.to(torch.bfloat16).float(), atol=0.01, rtol=0.01)
+    assert not guard.any(), "a layer's commit landed outside the pool"
+    assert not state[:, :slot].any(), "a commit landed in another slot"

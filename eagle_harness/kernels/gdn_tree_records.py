@@ -205,10 +205,13 @@ def _gdn_tree_records_commit_kernel(
         mask_k = o_k < K
         mask_v = o_v < V
         mask_h = mask_k[:, None] & mask_v[None, :]
-        p_state = state + i_l * stride_state_layer + slot * stride_state_slot + i_hv * K * V
+        # 64-bit layer offsets: the pool of all layers passes 2**31 elements (48 layers x 65 slots x 48 heads x 128 x 128
+        # at TP1 batch 64), where a 32-bit i_l * stride wraps and the commit writes outside the layer.
+        layer = i_l.to(tl.int64)
+        p_state = state + layer * stride_state_layer + slot * stride_state_slot + i_hv * K * V
         o_state = o_v[None, :] * K + o_k[:, None]
         b_h = tl.load(p_state + o_state, mask=mask_h, other=0).to(tl.float32)
-        p_rec = records + i_l * stride_records_layer + row * stride_records_row + i_hv * REC
+        p_rec = records + layer * stride_records_layer + row * stride_records_row + i_hv * REC
         for d in range(0, L):
             n = tl.sum(tl.where(offs_d == L - 1 - d, path, 0))
             p_node = p_rec + n.to(tl.int64) * HV * REC
