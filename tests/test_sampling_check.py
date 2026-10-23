@@ -137,6 +137,26 @@ def test_compare_runs_without_the_http_client(tmp_path):
     assert out.returncode == 0, out.stderr
 
 
+@pytest.mark.parametrize("reply", [
+    {"output_ids": [5, 6], "meta_info": {"spec_verify_ct": 1}},
+    [{"output_ids": [5, 6], "meta_info": {"spec_verify_ct": 1}}],
+    [{"meta_info": {"output_ids": [5, 6], "spec_verify_ct": 1}}],
+])
+def test_tokenspeed_generate_names_the_model_and_unwraps_the_reply(sampling_check, monkeypatch, reply):
+    # TokenSpeed's /generate routes by served model name and answers with a one-element list.
+    sent = {}
+
+    def post(url, json, timeout):
+        sent.update(url=url, body=json)
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: reply)
+
+    monkeypatch.setitem(sys.modules, "requests", SimpleNamespace(post=post))
+    ids, meta = sampling_check.generate("tokenspeed", "http://h", "served", [1, 2], {"temperature": 1.0}, 2)
+    assert (ids, meta) == ([5, 6], {"spec_verify_ct": 1})
+    assert sent["url"] == "http://h/generate" and sent["body"]["model"] == "served"
+    assert sent["body"]["sampling_params"] == {"max_new_tokens": 2, "ignore_eos": True, "temperature": 1.0}
+
+
 # A synthetic target: 40 tokens whose fp32 logits fall 0.45 (3.6 bf16 ulps at [16, 32)) per rank from 24, except that
 # ranks 8 and 9 sit 0.04 apart, a near tie right at a top-8 cut. A server start moves every logit by up to a quarter
 # bf16 ulp and the rank-8 one a further ulp up (odd starts) or down (even starts), so odd starts keep rank 8 and even

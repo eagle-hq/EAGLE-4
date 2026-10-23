@@ -56,7 +56,8 @@ own code for those parts.
 ## Does it support sampling, logprobs or images?
 
 SGLang and vLLM support sampled requests with the engine-specific restrictions below.
-`tools/sampling_check.py` compares a speculative server with a no-spec server. Sampling smoke tests alone
+`tools/sampling_check.py` compares a speculative server with a no-spec server (`--api sglang`, `vllm` or
+`tokenspeed`). Sampling smoke tests alone
 do not establish distribution equivalence for every model and workload.
 
 - vLLM: seeded sampling uses the target sampler, but an identical seed is not a blanket guarantee of the same

@@ -47,6 +47,9 @@ conversations one at a time (batch size 1, chat template, thinking off) at tempe
     python tools/sampling_check.py score --model <model dir> nospec.json --out scores.json
     python tools/sampling_check.py compare nospec.json spec.json --scores scores.json
 
+``--api`` names the server's HTTP API: ``sglang`` and ``tokenspeed`` (``/generate``, TokenSpeed with the served
+model's name) or ``vllm`` (``/v1/completions``).
+
 Exit code 1 (``compare``) when a test rejects at the corrected level, a draw falls outside every tolerated cut, or
 (``--deterministic``) a seed did not reproduce.
 """
@@ -89,14 +92,20 @@ POOL = 10  # cells seen fewer times than this in both runs together are pooled
 def generate(api: str, base: str, model: Optional[str], prompt: List[int], params: dict, max_new: int, seed=None):
     """One completion's output token ids (and sglang's ``spec_*`` meta info)."""
     import requests  # only the HTTP client needs it; compare runs in test envs without it
-    if api == "sglang":
+    if api in ("sglang", "tokenspeed"):
         sp = {"max_new_tokens": max_new, "ignore_eos": True, **params}
         if seed is not None:
             sp["sampling_seed"] = seed
-        r = requests.post(f"{base}/generate", json={"input_ids": prompt, "sampling_params": sp}, timeout=3600)
+        body = {"input_ids": prompt, "sampling_params": sp}
+        if api == "tokenspeed":  # TokenSpeed's /generate routes by model name and answers with a one-element list
+            body["model"] = model
+        r = requests.post(f"{base}/generate", json=body, timeout=3600)
         r.raise_for_status()
         out = r.json()
-        return out["output_ids"], {k: v for k, v in out["meta_info"].items() if k.startswith("spec_")}
+        out = out[0] if isinstance(out, list) else out
+        meta = out.get("meta_info") or {}
+        ids = out["output_ids"] if "output_ids" in out else meta["output_ids"]
+        return ids, {k: v for k, v in meta.items() if k.startswith("spec_")}
     body = {"model": model, "prompt": prompt, "max_tokens": max_new, "ignore_eos": True, "return_token_ids": True}
     body.update(params)
     if seed is not None:
@@ -122,7 +131,7 @@ def run(args) -> int:
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     base = f"http://127.0.0.1:{args.port}"
-    model = requests.get(f"{base}/v1/models", timeout=60).json()["data"][0]["id"] if args.api == "vllm" else None
+    model = requests.get(f"{base}/v1/models", timeout=60).json()["data"][0]["id"] if args.api != "sglang" else None
     prompts = [tokenizer.encode(p, add_special_tokens=False) for p in PROMPTS]
     result: dict = {
         "api": args.api,
@@ -597,7 +606,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
-    r.add_argument("--api", choices=("sglang", "vllm"), required=True)
+    r.add_argument("--api", choices=("sglang", "vllm", "tokenspeed"), required=True)
     r.add_argument("--port", type=int, required=True)
     r.add_argument("--tokenizer", required=True)
     r.add_argument("--out", required=True)
