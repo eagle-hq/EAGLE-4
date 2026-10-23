@@ -138,9 +138,14 @@ class EagleHarnessSpecAlgo(CustomSpecAlgo):
             load_round_times(self.config.data_path)
             if self.config.mode is Mode.SERVE and self.config.data_path else None
         )
-        plain = get_spec().speculative_eagle_topk == 1 and (
-            self.config.mode is Mode.CALIBRATE or any(0 in row for row in (rounds or {}).values())
-        )
+        from eagle_harness.sglang.chain_rounds import served_chain, served_tree
+        from eagle_harness.sglang.plain_decode import native_decode_available
+
+        topk = get_spec().speculative_eagle_topk
+        plain = (
+            topk == 1
+            and (self.config.mode is Mode.CALIBRATE or any(0 in row for row in (rounds or {}).values()))
+        ) or ((served_chain(self.config, topk) or served_tree(self.config, topk)) and native_decode_available())
         self.target_verify_graphs = VerifyWidthGraphs(
             self.config.intensity, max_width, TreeTailMask(info.device), plain_decode=plain
         )

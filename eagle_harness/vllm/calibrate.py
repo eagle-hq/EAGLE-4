@@ -230,13 +230,14 @@ def engine(model: str, draft: str, tp: int, width: int, chain: bool, max_num_seq
     else:
         method_config = {"mode": "static", "node_top_k": 8, "tree_depth": -(-width // 8) + 1, "max_verify_width": width}
         backend = "CUSTOM"
+    # vLLM's default token budget fits one full batch; a larger explicit one makes its warmup run a request longer
+    # than max_model_len, past the end of the block table.
     args = {
         "model": model,
         "tensor_parallel_size": tp,
         "max_model_len": 4608,
         "gpu_memory_utilization": 0.85,
         "max_num_seqs": max_num_seqs,
-        "max_num_batched_tokens": max(8192, max_num_seqs * width),
         "speculative_config": {
             "method": "eagle_harness",
             "model": draft,
@@ -294,7 +295,14 @@ def measure(
         "engine_args": engine_args or {},
         "target_shape": asdict(target_shape),
         "draft_shape": asdict(draft_shape),
-        "key": cost_key(model, draft, tp, config.model_config.dtype).to_dict(),
+        # Key by the engine's resolved models, as the server does when it loads the tables (speculator.load_model):
+        # vLLM may resolve a Hub id to a local snapshot directory, which config_digest names differently.
+        "key": cost_key(
+            config.model_config.model,
+            config.speculative_config.draft_model_config.model,
+            tp,
+            config.model_config.dtype,
+        ).to_dict(),
     }
     raw.update(context_step=context_step, context_stop=context_stop, target=target_rows, draft=draft_rows)
     with open(raw_path, "w", encoding="utf-8") as f:

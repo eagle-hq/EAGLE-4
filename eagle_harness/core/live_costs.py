@@ -189,6 +189,10 @@ class LiveCosts:
         # Seeding counts samples across intervals; crossing a boundary must still discard a first-use stall.
         return min((c.us for (b, w, _), c in self.cells.items() if b == bucket and w == width and c.samples), default=None)
 
+    def verify_us(self, bucket: int, width: int) -> Optional[float]:
+        """The priced verify of ``width`` tokens per request at ``bucket`` (shortest context first), None untimed."""
+        return self._value(bucket, width, 0)
+
     def tables(self) -> Dict[int, BatchCostTable]:
         """One table per ready bucket (the cost model's input), from the current cells."""
         tables: Dict[int, BatchCostTable] = {}

@@ -51,6 +51,9 @@
 
 **Leave speculation on. EAGLE-4 adapts to your hardware, batch and workload.**
 
+For high load, serve SGLang on four B300 GPUs with the [high-load recipe](docs/quickstart-sglang.md#high-load), which
+keeps pace with plain decoding up to 512 concurrent requests.
+
 EAGLE-4 (Extrapolation Algorithm for Greater Language-model Efficiency) speeds up LLM inference with
 speculative decoding. EAGLE-4 draft models are built to run with `eagle-harness`, which decides how far to
 speculate from measured costs on your setup, so every draft tree fits the batch size, the hardware and the

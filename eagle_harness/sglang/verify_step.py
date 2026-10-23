@@ -205,3 +205,19 @@ def fused_accept_step(
         )
 
     return accept_step
+
+
+# sglang's tiled KV move compiles one Triton program per next_power_of_2(moved slots), up to the pool's chunk size
+# (128 or 256 slots), and per slot count specialization (1, a multiple of 16, any other); it compiles only the
+# chunk-sized one at startup. A tree round moves the KV of its accepted tokens, so the smaller programs compiled while
+# serving: ~2 s each on B300, in the first rounds of each new load.
+KV_MOVE_MAX_SLOTS = 256
+
+
+def warm_up_kv_moves(kv_cache: Any, device: torch.device) -> None:
+    """Compile, before serving, the KV move of every slot count a tree round can move: slot 0 (the pool's padding
+    slot) onto itself, for each power of two up to :data:`KV_MOVE_MAX_SLOTS` and the count below it."""
+    counts = sorted({1} | {n - d for n in (2**i for i in range(1, KV_MOVE_MAX_SLOTS.bit_length())) for d in (0, 1)})
+    for count in counts:
+        slots = torch.zeros(count, dtype=torch.int64, device=device)
+        kv_cache.move_kv_cache(slots, slots)

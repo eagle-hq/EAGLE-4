@@ -1,7 +1,7 @@
 ---
 type: tutorial
 owner: eagle-harness
-last_verified: 2026-10-21
+last_verified: 2026-10-23
 ---
 
 # SGLang guide
@@ -80,7 +80,48 @@ sglang serve --model-path Qwen/Qwen3.8-27B --tp-size 4 --dtype bfloat16 \
 The benchmark warmed the server from its client, hence `--skip-server-warmup`: the first request after this start
 compiles kernels and seeds the costs. Keep CUDA graph padding enabled, and do not add
 `--disable-cuda-graph-padding`. `--max-running-requests 32` is the tree default; set a larger cap, up to 512, for
-larger batches.
+larger batches, or serve with the [high-load recipe](#high-load).
+
+## High load
+
+For many concurrent requests on four GPUs, serve with the high-load recipe. It raises the running cap and the decode
+graph limit to 512 and turns the radix cache off, so EAGLE-4 can decode a batch without speculation wherever
+speculation would be slower:
+
+```bash
+export TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=4
+export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1 SGLANG_TIMEOUT_KEEP_ALIVE=3600
+sglang serve --model-path Qwen/Qwen3.8-27B --tp-size 4 --dtype bfloat16 \
+  --trust-remote-code --attention-backend flashinfer --page-size 1 \
+  --max-running-requests 512 --cuda-graph-max-bs-decode 512 \
+  --mem-fraction-static 0.70 --context-length 32768 \
+  --chunked-prefill-size 16384 --mamba-ssm-dtype bfloat16 --disable-radix-cache \
+  --random-seed 721 --skip-server-warmup \
+  --speculative-algorithm EAGLE_HARNESS \
+  --speculative-draft-model-path EAGLE-Corp/Qwen3.8-27B-EAGLE4 \
+  --speculative-draft-model-quantization unquant --speculative-draft-attention-backend flashinfer \
+  --speculative-attention-mode prefill --speculative-num-steps 12 \
+  --speculative-eagle-topk 4 --speculative-num-draft-tokens 16 \
+  --speculative-algorithm-config '{"mode":"serve"}'
+```
+
+With the radix cache on, this hybrid model tracks prefix-cache state that a batch switching to plain decoding
+cannot carry, so the server speculates at every load. On one GPU, keep the radix cache on: high load on one GPU is
+not supported yet ([known limits](known-limits.md#high-load)).
+
+Each speedup divides EAGLE-4 throughput by the same command without the `--speculative-*` flags, in the same
+allocation, on 4x B300 with Qwen3.8-27B and its EAGLE-4 draft at temperature 0. Columns are concurrent requests:
+
+| Server start | 1 | 8 | 64 | 128 | 256 | 512 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| First start on a machine | 2.80× | 1.67× | 0.95× | 0.97× | 1.00× | 0.99× |
+| Restart with warm caches | 2.76× | 1.72× | 1.01× | 1.00× | 1.00× | 0.99× |
+
+The first start compiles kernels and measures its live costs during its first requests, which costs up to 5% at 64
+and 128 concurrent requests. A restart reuses the kernels and the costs and choices cached under
+`~/.cache/eagle-harness/costs`. This setup ships packaged choices; on another GPU, TP size or model pair the first
+start also searches them ([known limits](known-limits.md#high-load)). The
+[support matrix](support-matrix.md#012-high-load) has the tokens/s and the correctness checks.
 
 Live costs are cached per GPU, TP size, model pair, engine and dtype under `~/.cache/eagle-harness/costs`.
 The [calibration guide](calibration.md) explains live costs and offline chain calibration, and the

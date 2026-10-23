@@ -37,6 +37,15 @@ def test_seed_sweep_orders_width_one_first_then_widest_and_ends_when_sampled():
     assert not live.ready(4) and live.seed_width(4) == 1
 
 
+def test_a_verify_is_priced_once_timed_and_before_its_bucket_is_seeded():
+    live = _live()
+    assert live.verify_us(1, 1) is None
+    live.record(1, 1, 500, 4400.0)
+    assert live.verify_us(1, 1) == 4400.0 and not live.ready(1)
+    live.record(1, 1, 500, 4000.0)
+    assert live.verify_us(1, 1) == 4000.0 and live.verify_us(4, 1) is None
+
+
 def test_tables_hold_the_served_curve_and_fill_unmeasured_intervals():
     live = _live()
     _seed(live, 1, {1: 4000.0, 64: 7200.0, 32: 5700.0, 16: 4800.0, 8: 4500.0}, context=3000)

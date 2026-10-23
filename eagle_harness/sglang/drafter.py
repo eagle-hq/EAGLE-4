@@ -267,6 +267,11 @@ class DynamicDrafter:
         self._sampled_depth = tree.shape.max_depth
 
     # ----------------------------------------------------------------- policy
+    @property
+    def seeding(self) -> bool:
+        """Whether the last drafted round was forced to seed the live costs of its batch bucket."""
+        return self._seeding is not None
+
     def bucket(self, bs: int) -> int:
         """The cost bucket (captured batch size) a batch of ``bs`` requests runs at."""
         return self._bucket(bs)

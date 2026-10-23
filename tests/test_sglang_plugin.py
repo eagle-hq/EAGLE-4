@@ -349,6 +349,85 @@ def test_live_chain_does_not_read_offline_round_files(registered):
     assert isinstance(provider, VerifyWidthGraphs)
 
 
+@pytest.mark.parametrize("native", [True, False])
+def test_a_serve_mode_tree_captures_the_native_decode_graph_where_the_engine_has_the_route(registered, monkeypatch, native):
+    from sglang.srt.model_executor.runner.decode_graph_variants import DecodeGraphVariant
+
+    from eagle_harness.core.config import HarnessConfig
+    from eagle_harness.sglang import plain_decode
+
+    if native and not hasattr(DecodeGraphVariant, "forward_mode"):
+        pytest.skip("host has no per-variant forward mode")
+    monkeypatch.setattr(plain_decode, "native_decode_available", lambda: native)
+    registered.__dict__["config"] = HarnessConfig()
+    with get_context().override_server_args(
+        speculative_num_draft_tokens=16, speculative_eagle_topk=4, max_running_requests=512
+    ):
+        provider = registered.create_decode_graph_variants(_runner_info(False))
+    assert (provider._plain is not None) is native
+
+
+@pytest.mark.parametrize("draft_tokens", [4, 8, 16])
+def test_served_chain_never_builds_the_cost_model(monkeypatch, draft_tokens):
+    """A serve-mode chain without data_path chooses its widths on the served rounds, at every chain width (#145:
+    0.1.1 sized chains under 16 tokens by the tree rule). The cost model's chain-depth rule needs every width 1..max
+    in its tables, which live costs (captured widths only) never have: it failed at the first seeded batch
+    (``Invalid chain cost index: [0, 1, 3, 5, 7]``)."""
+    from sglang.srt.speculative.eagle_worker_v2 import EAGLEWorkerV2
+
+    from eagle_harness.sglang import worker as worker_mod
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("the served chain built the cost model")
+
+    monkeypatch.setattr(MlpL2WarmAhead, "install", classmethod(lambda cls, model, plan, device: None))
+    monkeypatch.setattr(worker_mod, "build_cost_model", refuse)
+    monkeypatch.setattr(worker_mod, "LiveCosts", refuse)
+    monkeypatch.setattr(worker_mod, "cost_key", lambda runner: SimpleNamespace(digest="setup"))
+    monkeypatch.setattr(EAGLEWorkerV2, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(torch.cuda, "Event", lambda *a, **k: None)
+    target = SimpleNamespace(model_runner=SimpleNamespace(model="target", device="cpu"))
+    with get_context().override_server_args(
+        speculative_algorithm_config=json.dumps({"intensity": "chain_intensity"}),
+        speculative_eagle_topk=1,
+        speculative_num_steps=draft_tokens - 1,
+        speculative_num_draft_tokens=draft_tokens,
+        max_running_requests=512,
+    ):
+        worker = EagleHarnessWorker(None, 0, 0, target)
+    assert worker._served_chain and worker.cost_model is None and worker.live is None
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_a_serve_mode_tree_keeps_its_cost_model_and_decodes_natively_where_the_engine_can(monkeypatch, native):
+    """The default tree sizes its rounds with the cost model on live costs and, where the engine has the native
+    route, chooses native decode per batch size on its served rounds (ServedTreePolicy)."""
+    from sglang.srt.speculative.eagle_worker_v2 import EAGLEWorkerV2
+
+    from eagle_harness.sglang import worker as worker_mod
+
+    built = []
+    monkeypatch.setattr(MlpL2WarmAhead, "install", classmethod(lambda cls, model, plan, device: None))
+    monkeypatch.setattr(worker_mod, "build_cost_model", lambda config, **kw: built.append(kw) or SimpleNamespace(tables={}))
+    monkeypatch.setattr(worker_mod, "LiveCosts", lambda **kw: SimpleNamespace(load=lambda path: False))
+    monkeypatch.setattr(worker_mod, "cost_key", lambda runner: SimpleNamespace(digest="setup"))
+    monkeypatch.setattr(worker_mod, "target_is_moe", lambda hf_config: False)
+    monkeypatch.setattr(worker_mod, "native_decode_available", lambda: native)
+    monkeypatch.setattr(EAGLEWorkerV2, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(torch.cuda, "Event", lambda *a, **k: None)
+    runner = SimpleNamespace(model="target", device="cpu", model_config=SimpleNamespace(hf_config=None))
+    with get_context().override_server_args(
+        speculative_algorithm_config="{}",
+        speculative_eagle_topk=4,
+        speculative_num_steps=12,
+        speculative_num_draft_tokens=16,
+        max_running_requests=512,
+    ):
+        worker = EagleHarnessWorker(None, 0, 0, SimpleNamespace(model_runner=runner))
+    assert len(built) == 1 and worker.live is not None and not worker._served_chain
+    assert worker._served_tree is native and worker._native_decode_enabled is native
+
+
 def test_verify_widths_follow_the_cost_buckets():
     from eagle_harness.core.limits import ComputeIntensity
 

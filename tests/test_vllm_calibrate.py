@@ -4,6 +4,7 @@
 """Config-derived calibration geometry and real CPU fitting."""
 
 import json
+import sys
 from dataclasses import asdict
 from types import SimpleNamespace
 
@@ -124,8 +125,8 @@ def test_measure_records_resolved_model_limit(monkeypatch, tmp_path):
 
     geometry = SimpleNamespace(num_hidden_layers=2)
     config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=geometry, max_model_len=8192, dtype="bfloat16"),
-        speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(hf_config=geometry)),
+        model_config=SimpleNamespace(model="target", hf_config=geometry, max_model_len=8192, dtype="bfloat16"),
+        speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(model="draft", hf_config=geometry)),
     )
     measured = []
 
@@ -143,6 +144,52 @@ def test_measure_records_resolved_model_limit(monkeypatch, tmp_path):
     assert raw["context_stop"] == 8192
     assert raw["key"] == key.to_dict()
     assert max(measured) > 4096 and max(measured) + 64 <= 8192
+
+
+def test_measure_keys_tables_like_the_server(monkeypatch, tmp_path):
+    # The server keys the tables it loads by the engine's resolved models (speculator.load_model). vLLM can resolve
+    # a Hub id to a local snapshot directory, so keying by the command-line id makes serve.sh refuse its own tables.
+    from eagle_harness.vllm import calibrate
+
+    snapshots = {}
+    for name in ("target", "draft"):
+        snapshots[name] = tmp_path / "hub" / name / "snapshots" / "0123abcd"
+        snapshots[name].mkdir(parents=True)
+        (snapshots[name] / "config.json").write_text(json.dumps({"name": name}))
+    geometry = SimpleNamespace(num_hidden_layers=2)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            model=str(snapshots["target"]), hf_config=geometry, max_model_len=4608, dtype="torch.bfloat16"
+        ),
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(model=str(snapshots["draft"]), hf_config=geometry)
+        ),
+    )
+    llm = SimpleNamespace(llm_engine=SimpleNamespace(vllm_config=config), collective_rpc=lambda name, args: [[]])
+    monkeypatch.setattr(calibrate, "engine", lambda *args, **kwargs: llm)
+    monkeypatch.setattr(calibrate.torch.cuda, "get_device_name", lambda *args: "fixture GPU")
+    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(__version__="fixture"))
+    output = tmp_path / "raw.json"
+    calibrate.measure(str(output), 8, False, [1], 256, 1, model="Org/target", draft="Org/draft", tp=4)
+    served = calibrate.cost_key(str(snapshots["target"]), str(snapshots["draft"]), 4, "torch.bfloat16")
+    assert json.loads(output.read_text())["key"] == served.to_dict()
+
+
+@pytest.mark.parametrize(
+    "chain,width,max_num_seqs,overrides",
+    [(False, 8, 1, {}), (False, 64, 1, {}), (True, 16, 64, {}), (False, 8, 1, {"max_model_len": 2048})],
+)
+def test_engine_token_budget_fits_one_batch(monkeypatch, chain, width, max_num_seqs, overrides):
+    # vLLM's warmup splits its token budget over max_num_seqs requests; a request longer than max_model_len indexes
+    # past the block table (device-side assert in the GDN checkpoint gather, issue #128).
+    from eagle_harness.vllm import calibrate
+
+    captured = {}
+    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(LLM=lambda **kwargs: captured.update(kwargs)))
+    monkeypatch.setitem(sys.modules, "vllm.plugins", SimpleNamespace(load_general_plugins=lambda: None))
+    calibrate.engine("target", "draft", 4, width, chain, max_num_seqs, **overrides)
+    budget = captured.get("max_num_batched_tokens")
+    assert budget is None or budget <= captured["max_num_seqs"] * captured["max_model_len"]
 
 
 def test_merge_rejects_different_tp(tmp_path):

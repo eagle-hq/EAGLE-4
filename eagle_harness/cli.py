@@ -114,6 +114,7 @@ def serving_command(args: argparse.Namespace) -> list[str]:
             "data_path": str(args.output),
         },
     }
+    # max_num_batched_tokens stays vLLM's default, which fits one full batch (see eagle_harness.vllm.calibrate.engine).
     options = {
         "tensor_parallel_size": args.tp,
         "host": "127.0.0.1",
@@ -122,7 +123,6 @@ def serving_command(args: argparse.Namespace) -> list[str]:
         "max_model_len": 4608,
         "gpu_memory_utilization": 0.85,
         "max_num_seqs": 1,
-        "max_num_batched_tokens": 8192,
         "seed": 0,
     }
     options.update(args.engine_args)

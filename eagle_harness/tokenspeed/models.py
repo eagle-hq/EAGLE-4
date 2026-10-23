@@ -25,14 +25,14 @@ import torch
 from tokenspeed.runtime.configs.model_config import configure_mha_attention
 from tokenspeed.runtime.configs.model_profile import ModelProfile
 from tokenspeed.runtime.distributed.comm_ops import all_gather
+from tokenspeed.runtime.layers.linear import ReplicatedLinear
 from tokenspeed.runtime.layers.logits_processor import LogitsProcessorOutput
 from tokenspeed.runtime.layers.vocab_parallel_embedding import ParallelLMHead
 from tokenspeed.runtime.models.llama_eagle3 import Eagle3DecoderLayer, LlamaForCausalLMEagle3
-from torch import nn
 
 from eagle_harness.kernels.candidate_ops import candidate_head as fused_candidate_head
 from eagle_harness.models.eagle4_config import check_ported
-from eagle_harness.models.low_rank_head import low_rank_scores
+from eagle_harness.models.low_rank_head import shard_scores
 
 
 @dataclass
@@ -72,7 +72,13 @@ class LlamaForCausalLMEagle4(LlamaForCausalLMEagle3):
             tp_group=lm_head.tp_group,
             prefix=f"{prefix}.efficient_lm_head" if prefix else "efficient_lm_head",
         )
-        self.efficient_lm_head_down_proj = nn.Linear(config.hidden_size, rank, bias=False)
+        # The engine's linear: its GEMM dispatch serves the few draft rows with a low-latency kernel.
+        self.efficient_lm_head_down_proj = ReplicatedLinear(
+            config.hidden_size,
+            rank,
+            bias=False,
+            prefix=f"{prefix}.efficient_lm_head_down_proj" if prefix else "efficient_lm_head_down_proj",
+        )
         self.tp_size = lm_head.tp_size
         self.tp_group = lm_head.tp_group
         self.cuda_candidate_kernels = True  # HarnessConfig.draft_model.cuda_candidate_kernels, set by the drafter
@@ -119,11 +125,9 @@ class LlamaForCausalLMEagle4(LlamaForCausalLMEagle3):
     def candidate_head(self, normed: torch.Tensor, k: int):
         """Candidate logits, target ids and top-k for recorded-q proposals."""
         shard = self.lm_head.shard_indices
-        scores = low_rank_scores(
-            normed,
-            self.efficient_lm_head_down_proj.weight,
-            self.efficient_lm_head.weight,
-            shard.org_vocab_end_index - shard.org_vocab_start_index,
+        low_rank, _ = self.efficient_lm_head_down_proj(normed)
+        scores = shard_scores(
+            low_rank, self.efficient_lm_head.weight, shard.org_vocab_end_index - shard.org_vocab_start_index
         )
         return fused_candidate_head(
             scores,

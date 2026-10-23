@@ -104,7 +104,7 @@ def modules(monkeypatch):
         "draft_steps": ("DraftSteps",),
         "l2_warm": ("MlpL2WarmAhead",),
         "row_attention": ("DraftRowAttention",),
-        "verify_step": ("AcceptTailGraphs", "fused_accept_step", "fused_accept_supported"),
+        "verify_step": ("AcceptTailGraphs", "fused_accept_step", "fused_accept_supported", "warm_up_kv_moves"),
         "verify_graphs": ("verify_widths", "round_up_width"),
         "verify_input": ("HarnessVerifyInput", "build_attn_args"),
         "verify_tail": ("VerifyTail",),
@@ -164,6 +164,7 @@ def make_worker(modules, monkeypatch, *, calibration=None, schedule=None, native
         draft=draft,
         last_width=4,
         timer=None,
+        seeding=False,
         prelaunch=prelaunch,
     )
     worker._drafter = drafter
@@ -383,7 +384,7 @@ def test_result_copies_precede_scheduler_prelaunch_fence(modules, monkeypatch):
     assert modules.copies == [("copy", True, False), ("fence", fence)]
 
 
-@pytest.mark.parametrize("kind", ["tree", "schedule", "calibrate"])
+@pytest.mark.parametrize("kind", ["tree", "schedule", "calibrate", "served", "served-tree"])
 def test_attention_initialization_wires_the_same_width_plan_into_both_routes(modules, monkeypatch, tmp_path, kind):
     class Draft:
         average_context = staticmethod(lambda batch: 5)
@@ -396,12 +397,18 @@ def test_attention_initialization_wires_the_same_width_plan_into_both_routes(mod
     monkeypatch.setattr(module, "DynamicDrafter", Draft)
     monkeypatch.setattr(module, "verify_widths", lambda *args: [4, 1])
     worker = module.EagleHarnessWorker.__new__(module.EagleHarnessWorker)
+    monkeypatch.setattr(module, "get_schedule", lambda: SimpleNamespace(max_running_requests=8))
+    monkeypatch.setattr(module, "cost_key", lambda runner: SimpleNamespace(digest="setup", to_dict=lambda: {}))
+    monkeypatch.setattr(module, "packaged_choices", lambda kind, key, runner: None)  # an unmeasured setup
     worker.config = SimpleNamespace(
         mode=module.Mode.CALIBRATE if kind == "calibrate" else module.Mode.SERVE,
         intensity=module.ComputeIntensity.CHAIN,
-        data_path=str(tmp_path),
+        data_path=None if kind == "served" else str(tmp_path),
+        cost_cache_dir=str(tmp_path),
     )
     worker._chain_schedule = [(1, 1, 4), (2, 8, 0)] if kind == "schedule" else None
+    worker._served_chain = kind == "served"
+    worker._served_tree = kind == "served-tree"
     worker._native_decode_enabled = kind != "tree"
     worker._target_worker = SimpleNamespace(model_runner=object())
     worker.fixed = object()
@@ -420,11 +427,31 @@ def test_attention_initialization_wires_the_same_width_plan_into_both_routes(mod
     elif kind == "schedule":
         assert width(1) == 4 and width(2) == 1
         assert worker._native_decode.select(two)
+    elif kind == "served":
+        # Every batch size starts its search at the root-only width, and native decode is never explored.
+        assert width(1) == width(2) == 1
+        assert not worker._native_decode.select(two)
+    elif kind == "served-tree":
+        # The cost model sizes every round; a batch size speculates before native decode is measured against it.
+        assert width is None and not worker._native_decode.select(two)
+        assert isinstance(worker._chain_rounds._policy, module.ServedTreePolicy)
     else:
         block = BLOCK_ROUNDS + MIN_ROUNDS
         widths = [width(1) for _ in range(2 * block + 1)]
         assert widths == [1] * block + [4] * block + [1]
         assert worker._native_decode.select(one)
+
+
+def test_packaged_choices_look_up_this_servers_setup(modules, monkeypatch):
+    module = modules.worker
+    monkeypatch.setattr(module, "get_model", lambda: SimpleNamespace(model_path="/target", quantization=None))
+    monkeypatch.setattr(module, "get_spec", lambda: SimpleNamespace(speculative_draft_model_path="/draft"))
+    seen = {}
+    monkeypatch.setattr(module, "packaged_served_choices", lambda kind, **setup: seen.update(setup, kind=kind) or {16: 4})
+    key = SimpleNamespace(gpu="NVIDIA B300 SXM6 AC", gpu_count=4)
+    assert module.packaged_choices("tree", key, SimpleNamespace(dtype=torch.bfloat16)) == {16: 4}
+    assert seen == dict(kind="tree", device_name="NVIDIA B300 SXM6 AC", model_path="/target", draft_model_path="/draft", tp_size=4,
+                        dtype="torch.bfloat16", quantization=None)
 
 
 @pytest.mark.parametrize("dp_size,tracking", [(2, False), (1, True), (2, True)])

@@ -23,8 +23,9 @@ One decode round:
    resumes them if the batch holds the same requests, else drafts from scratch.
 
 A chain (top-k 1, ``chain_intensity``) with served round times under ``data_path`` verifies a fixed width per
-batch size instead (:mod:`eagle_harness.sglang.chain_rounds`), and ``"mode": "calibrate"`` forces and times every
-chain width while it serves.
+batch size instead (:mod:`eagle_harness.sglang.chain_rounds`), a chain without ``data_path`` chooses that width on
+its served rounds (:class:`~eagle_harness.sglang.chain_rounds.ServedChainPolicy`), and ``"mode": "calibrate"`` forces
+and times every chain width while it serves.
 
 Prefill (target extend with aux hidden capture, then the draft extend) is
 sglang's EAGLE V2 path unchanged. With overlap scheduling, the worker publishes
@@ -39,7 +40,7 @@ import contextlib
 from functools import partial
 import logging
 import os
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Dict, Optional, Union
 
 import torch
 
@@ -60,19 +61,32 @@ from eagle_harness.core.chain_width import chain_widths
 from eagle_harness.kernels.accept_tail import warm_up as warm_up_accept_tail
 from eagle_harness.core.config import HarnessConfig, Mode, build_cost_model, parse_harness_config
 from eagle_harness.core.cost_model import CostModel, FixedShapePolicy
+from eagle_harness.core.cost_profiles import packaged_served_choices
 from eagle_harness.core.limits import ComputeIntensity
 from eagle_harness.core.draft_tree import DraftTree, TreeShape
 from eagle_harness.core.models import target_is_moe
-from eagle_harness.sglang.chain_rounds import ChainCalibration, ChainRounds
+from eagle_harness.sglang.chain_rounds import (
+    ChainCalibration,
+    ChainRounds,
+    ServedChainPolicy,
+    ServedTreePolicy,
+    served_chain,
+    served_tree,
+)
 from eagle_harness.core.live_costs import CostKey, LiveCosts, config_digest
 from eagle_harness.core.gemm_solutions import load_gemm_solutions
 from eagle_harness.sglang.draft_extend import DraftExtend
 from eagle_harness.sglang.draft_steps import DraftSteps
 from eagle_harness.sglang.drafter import DynamicDrafter, PrelaunchResult, spin_wait
 from eagle_harness.sglang.l2_warm import MlpL2WarmAhead
-from eagle_harness.sglang.plain_decode import NativeDecode
+from eagle_harness.sglang.plain_decode import NativeDecode, native_decode_available, native_decode_blocked
 from eagle_harness.sglang.row_attention import DraftRowAttention
-from eagle_harness.sglang.verify_step import AcceptTailGraphs, fused_accept_step, fused_accept_supported
+from eagle_harness.sglang.verify_step import (
+    AcceptTailGraphs,
+    fused_accept_step,
+    fused_accept_supported,
+    warm_up_kv_moves,
+)
 from eagle_harness.sglang.verify_graphs import verify_widths
 from eagle_harness.sglang.hooks import parameter_names
 from eagle_harness.sglang.verify_input import HarnessVerifyInput
@@ -97,6 +111,20 @@ def cost_key(runner) -> CostKey:
         draft=config_digest(get_spec().speculative_draft_model_path),
         engine=f"sglang {sglang_version}",
         dtype=str(runner.dtype),
+    )
+
+
+def packaged_choices(kind: str, key: CostKey, runner) -> Optional[Dict[int, int]]:
+    """The packaged served ``kind`` ("chain" or "tree") choices of this setup, if it was measured
+    (:func:`~eagle_harness.core.cost_profiles.packaged_served_choices`)."""
+    return packaged_served_choices(
+        kind,
+        device_name=key.gpu,
+        model_path=get_model().model_path,
+        draft_model_path=get_spec().speculative_draft_model_path,
+        tp_size=key.gpu_count,
+        dtype=str(runner.dtype),
+        quantization=get_model().quantization,
     )
 
 
@@ -171,12 +199,15 @@ class HarnessDraftWorker(EagleDraftWorker):
 
     def _warm_up_kernels(self) -> None:
         """Compile, before serving, the kernels whose first use would otherwise stall a served round: the fused
-        accept step (batch-size-1 trees) and the softmax of sglang's draft extend after a prefill (a JIT module).
+        accept step (batch-size-1 trees), the KV move of a tree's accepted tokens at every slot count, and the
+        softmax of sglang's draft extend after a prefill (a JIT module). A stall in a served round also skews the
+        served tree policy's comparison of speculation with native decode.
         """
         if torch.device(self.device).type != "cuda":
             return
         if self.topk > 1:
             warm_up_accept_tail(self.extend.hidden_rows(2), self.target_worker.model_runner.dtype)
+            warm_up_kv_moves(self.target_worker.model_runner.token_to_kv_pool_allocator.get_kvcache(), self.device)
         softmax = getattr(spec_utils, "sampling_softmax", None)
         if softmax is not None:
             # The engine dispatches by vocabulary size; a tiny tensor can warm a different backend.
@@ -221,17 +252,28 @@ class EagleHarnessWorker(EAGLEWorkerV2):
             verify_num=spec.speculative_num_draft_tokens,
         )
         self._chain_schedule = self._fixed_chain_widths(spec)
+        # A chain without served round times picks its width per batch size on the served rounds.
+        self._served_chain = served_chain(self.config, spec.speculative_eagle_topk)
+        # A tree speculates or decodes natively per batch size, chosen on its served rounds, where the engine can.
+        self._served_tree = served_tree(self.config, spec.speculative_eagle_topk) and native_decode_available()
+        if served_tree(self.config, spec.speculative_eagle_topk) and native_decode_blocked():
+            logger.warning(
+                "EAGLE_HARNESS: this server cannot switch to native decode where speculation loses (Mamba prefix-cache "
+                "tracking or DP attention), so it speculates at every load; --disable-radix-cache enables the switch."
+            )
         native_decode = self.config.mode is Mode.CALIBRATE or any(
             width == 0 for _, _, width in (self._chain_schedule or ())
         )
         if native_decode and (get_exec().mamba.enable_mamba_extra_buffer or get_parallel().dp_size != 1):
             raise ValueError("Native no-spec fallback requires DP1 and disabled Mamba prefix-cache tracking.")
-        self._native_decode_enabled = native_decode
+        self._native_decode_enabled = (
+            native_decode or self._served_tree or (self._served_chain and native_decode_available())
+        )
         self.fixed = FixedShapePolicy(self.config.intensity, **shape)
         # Built before sglang's __init__, which creates the draft worker through create_draft_worker.
         self.cost_model: Optional[CostModel] = None
         self.live: Optional[LiveCosts] = None
-        if self.config.mode.uses_cost_model and self._chain_schedule is None:
+        if self.config.mode.uses_cost_model and self._chain_schedule is None and not self._served_chain:
             runner = target_worker.model_runner
             key = cost_key(runner)
             if self.config.data_path:
@@ -322,9 +364,43 @@ class EagleHarnessWorker(EAGLEWorkerV2):
                 writer=writer,
                 native_decode=True,
             )
-        self._chain_rounds = ChainRounds(self._chain_schedule, calibration, DynamicDrafter.average_context)
         capture_bs, _ = get_batch_sizes_to_capture(self.target_worker.model_runner)
+
+        def bucket(bs: int) -> int:
+            return min((b for b in capture_bs if b >= bs), default=max(capture_bs, default=bs))
+
         tp_group = get_tp_group()
+        policy = None
+        if self._served_chain:
+            runner = self.target_worker.model_runner
+            key = cost_key(runner)
+            policy = ServedChainPolicy(
+                verify_widths(1, intensity, full),
+                torch.device(self.device),
+                max_batch_size=get_schedule().max_running_requests,
+                native_decode=self._native_decode_enabled,
+                writer=tp_group.rank_in_group == 0,
+                sync=lambda step: tp_group.broadcast_object(step, src=0),
+                cache_path=os.path.join(self.config.cost_cache_dir, f"{key.digest}-chain.json"),
+                key=key.to_dict(),
+                packaged=packaged_choices("chain", key, runner),
+            )
+        elif self._served_tree:
+            runner = self.target_worker.model_runner
+            key = cost_key(runner)
+            policy = ServedTreePolicy(
+                full,
+                torch.device(self.device),
+                max_batch_size=get_schedule().max_running_requests,
+                writer=tp_group.rank_in_group == 0,
+                sync=lambda step: tp_group.broadcast_object(step, src=0),
+                cache_path=os.path.join(self.config.cost_cache_dir, f"{key.digest}-tree.json"),
+                key=key.to_dict(),
+                packaged=packaged_choices("tree", key, runner),
+                # Native decode priced as the target's one-token verify at the batch's bucket.
+                native_us=None if self.live is None else lambda bs: self.live.verify_us(bucket(bs), 1),
+            )
+        self._chain_rounds = ChainRounds(self._chain_schedule, calibration, DynamicDrafter.average_context, policy)
         self._drafter = DynamicDrafter(
             self._draft_worker.steps,
             self.cost_model,
@@ -336,11 +412,13 @@ class EagleHarnessWorker(EAGLEWorkerV2):
             tree_mask_mode=self._draft_worker.tree_mask_mode,
             device=self.device,
             live=self.live,
-            bucket=lambda bs: min((b for b in capture_bs if b >= bs), default=max(capture_bs, default=bs)),
+            bucket=bucket,
             sync_cells=lambda cells: tp_group.broadcast_object(cells, src=0),
             save_cells=self._save_live_costs if tp_group.rank_in_group == 0 else None,
             chain_width=(
-                self._chain_rounds.draft_width if calibration is not None or self._chain_schedule is not None else None
+                self._chain_rounds.draft_width
+                if calibration is not None or self._chain_schedule is not None or self._served_chain
+                else None
             ),
         )
         self._native_decode = NativeDecode(
@@ -403,7 +481,7 @@ class EagleHarnessWorker(EAGLEWorkerV2):
                 with self._draft_context(), spec_stage_span("draft"):
                     batch.spec_info = self._drafter.draft(batch)
                 width = self._drafter.last_width
-                rounds.round_start(len(batch.seq_lens), width, batch)
+                rounds.round_start(len(batch.seq_lens), width, batch, settled=not self._drafter.seeding)
             with spec_stage_span("verify"):
                 started = None if timer is None else timer.start()
                 result, staged = self._verify(batch, width, grammar_barrier)

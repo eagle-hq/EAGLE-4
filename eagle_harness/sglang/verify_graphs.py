@@ -28,6 +28,11 @@ from eagle_harness.sglang.verify_input import HarnessVerifyInput
 from eagle_harness.sglang.verify_plan import TreeTailMask
 
 
+def native_decode_graphs() -> bool:
+    """Whether the engine captures a speculative graph variant in its own forward mode (native DECODE graphs)."""
+    return hasattr(DecodeGraphVariant, "forward_mode")
+
+
 def verify_widths(batch_size: int, intensity: ComputeIntensity, max_width: int) -> list:
     """Verify widths with a graph at ``batch_size``, widest first (``max_width`` and 1 always included)."""
     widths = {w for w in verify_buckets(batch_size, intensity) if w <= max_width}
@@ -60,7 +65,7 @@ class VerifyWidthGraphs(DecodeGraphVariants):
         self.max_width = max_width
         self.tail_mask = tail_mask
         self.greedy = greedy
-        if plain_decode and not hasattr(DecodeGraphVariant, "forward_mode"):
+        if plain_decode and not native_decode_graphs():
             raise RuntimeError("Native no-spec fallback requires SGLang's per-variant forward-mode graph contract.")
         self._plain = DecodeGraphVariant("decode", 1, ForwardMode.DECODE) if plain_decode else None
         self._variants: Dict[int, DecodeGraphVariant] = {}

@@ -36,6 +36,28 @@ optimal acceptance or no-loss behavior at high concurrency; compare sustained wo
 After seeding, a draft prefix is timed once per table-refresh period; target timings continue on served verifies.
 Prelaunched draft samples use that batch's bucket and context, not the preceding batch's seed key.
 
+An SGLang chain (`"intensity": "chain_intensity"`, `--speculative-eagle-topk 1`) without `data_path` does not use
+these cost tables. It picks one verify width per batch size (keyed to the nearest calibration batch size) from its
+own served rounds: committed tokens per wall-clock time over whole served intervals, prefill steps included, so the
+draft work a prefill or a batch change throws away is priced. Two widths are compared at a time on alternating
+blocks of rounds, widening while the wider one wins. When the engine captures native decode graphs, native decode
+is measured last at a batch size and, where it wins, serves that batch size and every larger one: its requests stop
+drafting until they finish. The choices are cached next to the live costs (`<key>-chain.json`), so a restart on the
+same setup serves them from its first round. A first start on a B300 TP4 with the Qwen3.8-27B checkpoint pair serves
+packaged choices instead (width 4 at batch 16 and 64, native decode from 256;
+[profile](../eagle_harness/core/profiles/b300-qwen3.8-27b-tp4-chain/README.md)) and searches only the other batch
+sizes; on other setups the first start pays the search.
+
+A serve-mode tree (the default) keeps the cost tables for the shape of each round and decides per batch size only
+whether to speculate at all, on the same served intervals: speculation is priced by the tokens its rounds committed,
+rounds that seed the live costs are not counted, and native decode is measured last and must lose by two standard
+errors. Requests decoded natively stop drafting until they finish, and so do requests that join their batch, so
+native decode is not measured where speculation beats its estimate from the live costs (the one-token verify) by
+1.5x. Native decode at a batch size serves every larger one and speculation every smaller one. The choices are cached
+as `<key>-tree.json`; a first start on the B300 TP4 setup above serves packaged choices (speculation up to batch 8,
+native decode from 64) and searches the batch sizes in between. Without native decode graphs in the engine, or with
+Mamba prefix-cache tracking or DP attention, the tree speculates at every batch size, as before.
+
 Offline calibration below remains the precise mode: it times isolated steps on dummy batches over a fine context
 grid. Its tables carry the same key in `key.json`; a server refuses tables keyed for another setup, and accepts
 tables without a key (measured before keys existed) with a warning.
@@ -151,6 +173,8 @@ or a private proxy before exposing the API.
 
 The vLLM sweep takes `context_stop` from the resolved `max_model_len` (including engine overrides),
 records it in each raw file, and fits that same range. The default engine limit remains 4608.
+The engine and `serve.sh` keep vLLM's default `max_num_batched_tokens`, which fits one batch of
+`max_num_seqs` requests at `max_model_len`. A value set through `--engine-args` must stay within that product.
 The limit must be a multiple of the context step, with room for the widest verify after the
 last sample; unsupported grids fail rather than silently measuring a shorter context.
 Raw files without `context_stop` must be regenerated. Context-indexed cost tables log once

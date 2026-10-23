@@ -243,6 +243,20 @@ def test_vllm_overrides_survive_command_rendering(options, expected, capsys):
     assert command[index : index + len(expected)] == expected
 
 
+@pytest.mark.parametrize("engine_args", [{}, {"max_model_len": 2048}])
+def test_vllm_serve_command_token_budget_fits_one_batch(engine_args, capsys):
+    # A budget above max_num_seqs * max_model_len makes vLLM's warmup run one request past the block table (#128).
+    argv = ["calibrate", "--model", "m", "--draft", "d", "--engine", "vllm", "--dry-run"]
+    assert cli.main([*argv, "--engine-args", json.dumps(engine_args)]) == 0
+    command = shlex.split(capsys.readouterr().out.splitlines()[-1])
+
+    def flag(name):
+        return int(command[command.index(name) + 1]) if name in command else None
+
+    budget = flag("--max-num-batched-tokens")
+    assert budget is None or budget <= flag("--max-num-seqs") * flag("--max-model-len")
+
+
 def test_empty_cost_tables_do_not_publish_serve_command(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_engine", lambda name: "vllm")
 

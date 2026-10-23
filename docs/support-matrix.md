@@ -1,14 +1,14 @@
 ---
 type: reference
 owner: eagle-harness
-last_verified: 2026-10-21
+last_verified: 2026-10-23
 ---
 
 # Measured support matrix
 
 Each cell divides EAGLE-4 throughput by the same engine's matched no-speculation control, measured in the same
-allocation, on Qwen3.8-27B with its EAGLE-4 draft unless the table names another model. The page has three parts:
-[0.1.0](#010-released), [0.1.1](#011-released-current) and
+allocation, on Qwen3.8-27B with its EAGLE-4 draft unless the table names another model. The page has four parts:
+[0.1.0](#010-released), [0.1.1](#011-released), [0.1.2](#012-released-current) and
 [unreleased candidates](#unreleased-measured-on-candidates-not-in-a-release). Shipped and candidate numbers never
 share a row. Column headers are client concurrency, the number of requests the client keeps in flight.
 
@@ -130,7 +130,7 @@ test the published `0.1.0` images, each pullable without credentials, and the SG
 `eagle-harness` 0.1.0 wheel from PyPI. TokenSpeed has no full-decode native top-logprobs yet, so each divergent
 prefix in its checks goes directly to fp32 arbitration.
 
-## 0.1.1 (released, current)
+## 0.1.1 (released)
 
 `eagle-harness` 0.1.1 with `sglang==0.5.23.dev252+eagle.5`, the unchanged `vllm==0.32.0rc1.dev283+eagle.4`, and
 `tokenspeed==0.1.1+eagle.5` with `tokenspeed-kernel==0.1.4+eagle.5` and `tokenspeed-scheduler==0.1.40+eagle.4`.
@@ -215,6 +215,88 @@ The published 0.1.1 images (`eagle-4-sglang:0.1.1`, `eagle-4-vllm:0.1.1`, `eagle
 checks as the 0.1.0 images: SGLang 5 exact / 15 near ties, vLLM 7 exact / 12 near ties / 1 fp32-tolerance pass, and
 TokenSpeed in serve mode 6 exact / 8 fp32-tolerance passes / 6 fp32-argmax.
 
+## 0.1.2 (released, current)
+
+`eagle-harness` 0.1.2 with the 0.1.1 engines: `sglang==0.5.23.dev252+eagle.5`, `vllm==0.32.0rc1.dev283+eagle.4`,
+and `tokenspeed==0.1.1+eagle.5` with `tokenspeed-kernel==0.1.4+eagle.5` and `tokenspeed-scheduler==0.1.40+eagle.4`.
+Every row runs on NVIDIA B300, on the release candidate build of `eagle-harness` 0.1.2 installed into clean
+environments with the published engine wheels and served from outside any checkout. In the same allocations, 0.1.2
+measured between 0.98× and 1.07× the 0.1.1 packages in every cell where both ran. The SGLang ROCm install keeps its
+0.1.0 packages, so the 0.1.0 MI355X row applies.
+
+### 0.1.2 speed by engine and concurrency
+
+| Engine and setup | 1 | 8 | 64 |
+|---|---|---|---|
+| SGLang TP4, temperature 0 | ✅ 3.35× | ✅ 2.11× | ✅ 1.38× |
+| SGLang TP4, temperature 1 | ✅ 2.74× | ✅ 1.78× | ✅ 1.25× |
+| SGLang TP1, quick-start command | ✅ 2.87× | ✅ 1.87× | ⚠️ 0.73× |
+| vLLM TP4 | ✅ 2.83× | ✅ 1.73× | ⚠️ 1.19× |
+| TokenSpeed TP4 | ✅ 3.13× | ✅ 2.00× | ✅ 1.40× |
+
+Sources:
+
+1. SGLang TP4, temperature 0: the measured recipe of the [SGLang guide](quickstart-sglang.md#the-measured-recipe)
+   (running cap 32). EAGLE-4 733.8, 3257.9 and 6488.2 tokens/s, no-spec 219.0, 1545.2 and 4718.6, 2 starts per
+   arm. The 0.1.1 packages in the same allocation measured 3.36×, 2.11× and 1.40×. Every start gives 5 exact /
+   15 near tie.
+2. SGLang TP4, temperature 1, same starts: EAGLE-4 595.6, 2739.8 and 5827.9 tokens/s, no-spec at temperature 1
+   217.4, 1539.4 and 4675.2.
+3. SGLang TP1: the quick-start command on one GPU, 20, 64 and 384 SPEED-Bench first turns with up to 256 new
+   tokens. EAGLE-4 302.7, 1271.8 and 2096.3 tokens/s, no-spec 105.5, 679.9 and 2870.2, 2 starts per arm. The 0.1.1
+   packages measured 2.90×, 1.91× and 0.75×. The twenty-prompt and concurrency-64 checks pass. Concurrency 64 is a
+   [known limit](known-limits.md#high-load).
+4. vLLM TP4: the measured command of the [vLLM guide](quickstart-vllm.md) (running cap 64, packaged rounds file),
+   two allocations with 2 starts per arm each. Concurrency 1 is 22 first turns with up to 512 new tokens. EAGLE-4
+   678.5, 2887.4 and 8013.4 tokens/s, no-spec 239.4, 1668.9 and 6725.4. Every twenty-prompt check passes. The
+   64-prompt check at concurrency 64 shows the one-prompt divergence of 0.1.1, which the 0.1.1 packages also show in
+   the same allocation ([known limits](known-limits.md#performance-and-correctness-in-progress)).
+5. TokenSpeed TP4: serve mode with TokenSpeed cost tables, running cap 4 at 1 and 32 at 8 and 64, 2 starts per
+   arm. Concurrency 1 is 22 conversations and 31 turns with up to 1024 new tokens: 886.5 against 283.5 tokens/s.
+   Eleven first turns with up to 256 tokens give 819.7 against 280.7 (2.92×). Concurrency 8 and 64 use 22 and 88
+   first turns with up to 256 tokens: 3256.4 against 1628.2 and 6974.1 against 4969.8. Every start gives 6 exact /
+   14 fp32 pass.
+
+### 0.1.2 high load
+
+SGLang TP4 with a running cap of 512: the [high-load recipe](quickstart-sglang.md#high-load), and the quick-start
+command with `--tp-size 4`. Concurrency 64 serves 384 SPEED-Bench first turns and higher concurrencies serve four
+times the concurrency, each with up to 256 new tokens.
+
+| Engine and setup | 64 | 128 | 256 | 512 |
+|---|---|---|---|---|
+| SGLang TP4, high-load recipe, first start | ⚠️ 0.95× | ✅ 0.97× | ✅ 1.00× | ⚠️ 0.99× |
+| SGLang TP4, high-load recipe, restart with warm caches | ⚠️ 1.01× | ✅ 1.00× | ✅ 1.00× | ⚠️ 0.99× |
+| SGLang TP4, quick-start command with `--tp-size 4` | ⚠️ 0.80× | ⚠️ 0.48× | ⚠️ 0.37× | ⚠️ 0.32× |
+| SGLang TP1, quick-start command | ⚠️ 0.73× | — | ⚠️ 0.59× | — |
+
+Sources:
+
+1. High-load recipe, first start on a machine (empty kernel and cost caches), 3 starts over three allocations,
+   each against the mean of 3 no-spec starts in its own allocation: EAGLE-4 6935.2, 10737.0, 14253.5 and
+   16152.6 tokens/s, no-spec 7313.7, 11086.4, 14264.9 and 16340.7. At 1 and 8 concurrent requests it measured 2.80×
+   and 1.67× (704.3 and 2732.3 against 251.7 and 1634.7). Concurrency 64 ranges from 0.935× to 0.969× over the
+   three starts.
+2. Restart with the first start's caches, 3 starts in the same allocations: 7393.3, 11114.3, 14332.3 and
+   16197.5 tokens/s, and 2.76× and 1.72× at 1 and 8. Every twenty-prompt check passes for both rows. The 384-prompt
+   check at 64 has one prompt outside the fp32 rule in 2 of 6 starts, at a prefix where the engine without
+   speculation emits the same token under another batch shape. The 2048-prompt check at 512 has one to three such
+   prompts in 3 of 6 starts, and one to three between two no-spec starts in every allocation.
+3. Quick-start command with `--tp-size 4`: 4377.7, 4723.1, 4490.4 and 4503.0 tokens/s against 5486.2, 9782.2,
+   12034.3 and 14159.3, 2 starts per arm. The server admits 32 running requests (the default tree), and the radix
+   cache keeps the batch on speculation. The 0.1.1 packages measured 0.75×, 0.48×, 0.38× and 0.32×.
+4. TP1 quick-start command, the starts of the speed table: 2183.0 against 3691.8 tokens/s at 256. The 0.1.1
+   packages measured 0.75× and 0.60×. See [known limits](known-limits.md#high-load).
+
+### 0.1.2 correctness and request features
+
+| Change | Result |
+|---|---|
+| `eagle-harness calibrate --engine vllm` completes on the Qwen3.8 hybrid target, and its `serve.sh` loads the tables it wrote | ✅ 20/20 |
+
+The calibration ran on B300 TP4 with the 0.1.1 vLLM engine. Both the printed `serve.sh` and the quickstart command
+pass the twenty-prompt check (4 exact / 15 near tie / 1 fp32 pass), 1 start each. No speed is claimed for it.
+
 ## Unreleased (measured on candidates, not in a release)
 
 These rows measure changes that are not in a published release. Each row names the change and its engine build.
@@ -298,15 +380,6 @@ Sources:
    (3 reproduced).
 3. TokenSpeed: running cap 8, 11 and 22 first turns with up to 256 tokens, 2 starts per arm. 597.3 against 312.2 and
    2122.4 against 1167.0 tokens/s. The check has 1 failure, reproduced by the engine without speculation.
-
-### Candidate correctness checks
-
-| Change | Result |
-|---|---|
-| `eagle-harness calibrate --engine vllm` completes on the Qwen3.8 hybrid target, and its `serve.sh` loads the tables it wrote | ✅ 20/20 |
-
-The calibration ran on B300 TP4 with the 0.1.1 vLLM engine. Both the printed `serve.sh` and the quickstart command
-pass the twenty-prompt check (4 exact / 15 near tie / 1 fp32 pass), 1 start each. No speed is claimed for it.
 
 ### In progress
 

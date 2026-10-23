@@ -23,6 +23,24 @@ if TYPE_CHECKING:
     from eagle_harness.sglang.chain_rounds import ChainRounds
 
 
+def native_decode_available() -> bool:
+    """Whether native decode can serve requests that stop drafting: the engine captures native DECODE graphs among
+    the speculative graph variants, and neither Mamba prefix-cache tracking nor DP attention needs the draft's state."""
+    from sglang.srt.runtime_context import get_exec, get_parallel
+
+    from eagle_harness.sglang.verify_graphs import native_decode_graphs
+
+    return native_decode_graphs() and not get_exec().mamba.enable_mamba_extra_buffer and get_parallel().dp_size == 1
+
+
+def native_decode_blocked() -> bool:
+    """Whether the engine has native DECODE graphs but this server's settings (Mamba prefix-cache tracking, DP
+    attention) keep requests from switching to them."""
+    from eagle_harness.sglang.verify_graphs import native_decode_graphs
+
+    return native_decode_graphs() and not native_decode_available()
+
+
 class NoSpecRequests:
     """Keep a request off until it finishes; skipped draft KV is never reused."""
 

@@ -96,6 +96,44 @@ def test_startup_softmax_uses_the_served_vocabulary(monkeypatch, vocab_size):
     assert calls == [((1, vocab_size), torch.float32)]
 
 
+def test_tree_warm_up_moves_the_kv_of_the_target_pool(monkeypatch):
+    """A tree's verify moves the accepted tokens' KV in the target's pool: its move kernels compile before serving."""
+    pool = object()
+    moved, accept_tail = [], []
+    monkeypatch.setattr(worker_mod, "warm_up_accept_tail", lambda *args: accept_tail.append(args))
+    monkeypatch.setattr(worker_mod, "warm_up_kv_moves", lambda kv_cache, device: moved.append((kv_cache, device)))
+    monkeypatch.setattr(worker_mod.spec_utils, "sampling_softmax", None)
+    allocator = SimpleNamespace(get_kvcache=lambda: pool)
+    worker = SimpleNamespace(
+        device="cuda", topk=4, extend=SimpleNamespace(hidden_rows=lambda rows: rows),
+        target_worker=SimpleNamespace(model_runner=SimpleNamespace(dtype=torch.bfloat16,
+                                                                   token_to_kv_pool_allocator=allocator)),
+    )
+    worker_mod.HarnessDraftWorker._warm_up_kernels(worker)
+    assert moved == [(pool, "cuda")] and len(accept_tail) == 1
+    worker.topk = 1  # a chain's accepted tokens are already in place: nothing moves
+    moved.clear()
+    worker_mod.HarnessDraftWorker._warm_up_kernels(worker)
+    assert moved == []
+
+
+def test_kv_move_warm_up_covers_every_program_a_round_can_compile():
+    """sglang's tiled KV move compiles one program per next power of two of the moved slots (up to its chunk) and
+    per slot count specialization (1, a multiple of 16, any other): the warm-up runs each, on the padding slot."""
+    from eagle_harness.sglang.verify_step import KV_MOVE_MAX_SLOTS, warm_up_kv_moves
+
+    moves = []
+    warm_up_kv_moves(SimpleNamespace(move_kv_cache=lambda tgt, src: moves.append((tgt.clone(), src.clone()))), "cpu")
+    assert all(tgt.dtype == torch.int64 and not tgt.any() and not src.any() for tgt, src in moves)
+
+    def program(count):
+        return 1 << (count - 1).bit_length(), "one" if count == 1 else "x16" if count % 16 == 0 else "other"
+
+    warmed = {program(len(tgt)) for tgt, _ in moves}
+    assert warmed == {program(count) for count in range(1, KV_MOVE_MAX_SLOTS + 1)}
+    assert KV_MOVE_MAX_SLOTS >= 256  # sglang's largest chunk (smaller KV strides)
+
+
 @pytest.mark.parametrize("engine_verify, active", [(_verify_without_hook, False), (_verify_with_hook, False), (_verify_with_hook, True)])
 def test_verify_passes_the_tree_sampler_only_for_an_active_sampled_tree(monkeypatch, engine_verify, active):
     monkeypatch.setattr(worker_mod, "run_eagle_verify", engine_verify)

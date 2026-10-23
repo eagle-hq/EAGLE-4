@@ -34,7 +34,11 @@ def low_rank_scores(
 ) -> torch.Tensor:
     """``[rows, shard vocab]`` rank-r scores of one vocab shard (``down_proj`` [rank, H], ``score_head`` [shard vocab,
     rank]), ``-inf`` past the shard's ``vocab_rows`` real rows."""
-    low_rank = hidden @ down_proj.t()
+    return shard_scores(hidden @ down_proj.t(), score_head, vocab_rows)
+
+
+def shard_scores(low_rank: torch.Tensor, score_head: torch.Tensor, vocab_rows: int) -> torch.Tensor:
+    """:func:`low_rank_scores` from the rank-r projection ``low_rank`` [rows, rank] the caller computed."""
     scores = low_rank.to(score_head.dtype) @ score_head.t()
     if scores.shape[-1] > vocab_rows:
         scores[:, vocab_rows:] = float("-inf")

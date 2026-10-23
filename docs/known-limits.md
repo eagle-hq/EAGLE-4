@@ -1,7 +1,7 @@
 ---
 type: reference
 owner: eagle-harness
-last_verified: 2026-10-21
+last_verified: 2026-10-23
 ---
 
 # Known limits
@@ -21,15 +21,45 @@ kernel is a startup check.
 - Throughput depends on the model, draft, engine, precision, TP size, attention backend, context length and
   workload. A result at one concurrency does not establish a result at another.
 
+## High load
+
+On SGLang with four GPUs, the [high-load recipe](quickstart-sglang.md#high-load) keeps pace with plain decoding up
+to 512 concurrent requests. These limits apply around it:
+
+- The SGLang command of the README quick start is slower than plain decoding above about 32 to 64 concurrent
+  requests. On one B300 it measured 0.73× the same engine without speculation at concurrency 64 and 0.59× at 256.
+  With `--tp-size 4` it measured 0.80× at 64, 0.48× at 128, 0.37× at 256 and 0.32× at 512 (2 starts each). Three
+  settings cause it. The radix cache, on by default, makes this hybrid model track prefix-cache state that a batch
+  switching to plain decoding cannot carry yet, so the server speculates at every load. The default tree caps a
+  four-GPU server at 32 running requests, while plain decoding admits several hundred. On one GPU, the engine
+  reserves verify state for every admitted request, so a speculative server admits about a quarter of the
+  requests plain decoding does. For high load on four GPUs, use the high-load recipe. A fix for the default
+  command is planned.
+- High load on one GPU is not supported yet. On one GPU, a speculative server started with
+  `--disable-radix-cache` stops during draft graph capture, so keep the radix cache on there. The high-load recipe
+  is for four GPUs, and the server log's advice to add `--disable-radix-cache` applies to four GPUs only.
+- The first start of the high-load recipe on a machine compiles kernels and measures its live costs during its
+  first requests. It measured 0.95× at 64 and 0.97× at 128 concurrent requests, and restarts with warm caches
+  1.01× and 1.00× (3 starts each).
+- The packaged choices cover B300 TP4 with the Qwen3.8-27B checkpoint pair. On other setups the first start also
+  searches its choices while serving: with the packaged choices withheld on that same setup, first starts measured
+  0.80× at concurrency 64 (4 starts, from 0.71× to 0.96×) and restarts 0.94× (2 starts). From 128 concurrent
+  requests up they measured 0.97× or more.
+- Requests decoded without speculation stop drafting until they finish, and so do requests that join their
+  batch. After a load spike, a batch keeps decoding without speculation until it empties, even when the load
+  drops in the meantime.
+- Greedy agreement at 64 and 512 concurrent requests is checked with the fp32 rule, not claimed. At 64, one prompt
+  takes another token at one position in 3 of 12 EAGLE-4 starts, a prefix where the engine without speculation
+  emits the same token under another batch shape. At 512, the engine without speculation also differs between its
+  own starts. Every twenty-prompt check passes.
+- vLLM and TokenSpeed do not switch to plain decoding at high load yet. Above concurrency 64 they can be slower
+  with speculation than without it, so serve those loads without speculation for now. The switch is planned for
+  both engines.
+
 ## Performance and correctness in progress
 
 - SGLang TP4 single-request and 32K-context optimization is in progress, as is TP8 concurrency-8 prefill
   overhead and intermittent stalls. Repeated passes in one process are not independent server starts.
-- SGLang above concurrency 64: with a running cap of 512 and the default tree (TP4), EAGLE-4 measured 1.03x the
-  same engine without speculation at concurrency 64, 0.74x at 256 and 0.61x at 512 (3 starts each). Serve
-  concurrency above 64 without speculation for now. The automatic high-load policy and high-load fixed-chain
-  improvements are being qualified and stay off by default. Greedy agreement with no-spec at concurrency 512 is
-  not claimed: the engine without speculation also differs between two starts there.
 - SGLang native-OFF, including OFF forced by a cost profile, uses the engine's per-variant forward-mode
   decode graphs (the `forward_mode` field of the decode graph variant). The SGLang CUDA engine
   `0.5.23.dev252+eagle.5` has them. On the 0.1.0 SGLang CUDA engine and on ROCm, EAGLE-4 keeps native-OFF off.
@@ -45,8 +75,8 @@ kernel is a startup check.
   optimized to match native decoding.
 - vLLM TP4 at concurrency 64: in a 64-prompt greedy comparison against no-spec, one prompt can take another token
   at one position, up to 5.4 bf16 ULP from the fp32 choice, beyond the 2-ULP rule. It appeared in 3 of 6 EAGLE-4
-  starts with 0.1.1 and in 2 of 6 with 0.1.0 (the vLLM engine is the same); the other prompts and every
-  twenty-prompt check at concurrency 1 pass. The cause is being investigated.
+  starts with 0.1.1 and in 2 of 6 with 0.1.0, and 0.1.2 shows it too (the vLLM engine is the same); the other
+  prompts and every twenty-prompt check at concurrency 1 pass. The cause is being investigated.
 - AMD measurements apply to the MI355X TP1 Qwen3.8 profile. On one MI355X the speedup covers concurrency up
   to 32; concurrency 64 is being optimized, so serve it without speculation for now. HIP side-stream prelaunch
   stays off: its replay check passes and it measured no throughput gain on MI355X. Further target, draft and

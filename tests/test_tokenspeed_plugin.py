@@ -148,3 +148,44 @@ def test_candidate_gather_rides_the_last_dim_as_16_bit_words(monkeypatch):
     assert calls == [(torch.int16, (rows, 2 * n), "tp", -1)]
     assert out.shape == (tp, rows, n) and out.dtype == torch.int32
     assert all(torch.equal(out[r], shards[r]) for r in range(tp))
+
+
+def test_candidate_head_projects_through_the_engine_linear(monkeypatch):
+    """The rank-r projection runs through the engine's linear (its GEMM dispatch picks the low-latency kernel for the
+    few draft rows), and the shard scores are that projection times the score head, ``-inf`` past the real rows."""
+    import torch
+
+    from eagle_harness.tokenspeed import models
+
+    rows, hidden, rank, shard_vocab, real_rows = 3, 16, 4, 10, 8
+    g = torch.Generator().manual_seed(11)
+    normed = torch.randn(rows, hidden, generator=g)
+    down = torch.randn(rank, hidden, generator=g)
+    score_head = torch.randn(shard_vocab, rank, generator=g)
+    projected = []
+
+    def project(x):
+        projected.append(x)
+        return x @ down.t(), None
+
+    head = models.LlamaForCausalLMEagle4.__new__(models.LlamaForCausalLMEagle4)
+    torch.nn.Module.__init__(head)
+    head.efficient_lm_head_down_proj = project
+    head.efficient_lm_head = torch.nn.Module()
+    head.efficient_lm_head.weight = torch.nn.Parameter(score_head)
+    head.lm_head = torch.nn.Module()
+    head.lm_head.shard_indices = type("Shard", (), {"org_vocab_start_index": 0, "org_vocab_end_index": real_rows})()
+    head.lm_head.weight = torch.nn.Parameter(torch.zeros(shard_vocab, hidden))
+    head.num_candidates, head.tp_size, head.cuda_candidate_kernels = 4, 1, False
+    seen = {}
+
+    def candidate_head(scores, *args, **kwargs):
+        seen["scores"] = scores
+        return None, None, None
+
+    monkeypatch.setattr(models, "fused_candidate_head", candidate_head)
+    head.candidate_topk(normed, 2)
+    assert len(projected) == 1 and projected[0] is normed
+    expected = (normed @ down.t()) @ score_head.t()
+    assert torch.allclose(seen["scores"][:, :real_rows], expected[:, :real_rows])
+    assert torch.isinf(seen["scores"][:, real_rows:]).all()
