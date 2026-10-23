@@ -108,23 +108,35 @@ to 512 concurrent requests. These limits apply around it:
 
 TokenSpeed serves EAGLE-4 with static and calibrated trees, chains and sampled trees on NVIDIA GPUs. Install the
 engine, its native packages and `eagle-harness` together with the [install command](install.md#tokenspeed-cuda),
-because the adapter needs the matching engine hooks. The 0.1.1 measurements cover serve mode at TP4 and
-temperature 0, at concurrency 1, 8 and 64 ([support matrix](support-matrix.md#011-speed-by-engine-and-concurrency)).
+because the adapter needs the matching engine hooks. The 0.1.2 measurements cover serve mode at TP1 and TP4,
+temperature 0 and 1, 32K-token contexts and four-GPU chains
+([support matrix](support-matrix.md#012-speed-by-engine-and-concurrency)).
 
 - TokenSpeed runs on CUDA only. On AMD GPUs, serve with SGLang ROCm ([AMD guide](quickstart-amd.md)).
 - On one GPU, start the server with `--disable-kvstore`. By default TokenSpeed adds a host KV cache tier twice the
   size of the GPU's KV cache, and a one-GPU server cannot pin that much host memory. The guide's commands pass the
   flag.
-- TokenSpeed refuses prompt logprobs. Per-request sampled-tree overrides, live cost measurement and native
-  no-speculation rounds are not available on TokenSpeed yet. A zero-draft speculative round is not a native
-  no-speculation round.
-- Serve mode needs cost tables measured for TokenSpeed. Tree and chain cost data must match the served shape, TP
-  size, target, draft and recurrent-state dtype.
-- These shapes are not yet measured on 0.1.1: serve mode at TP1 and TP8 (the
-  [candidate rows](support-matrix.md#candidate-speed-by-engine-and-concurrency) have earlier results), temperature 1,
-  where the sampled-output distribution is being qualified, and 32K-token contexts. TP4 single-request
-  optimization, four-GPU chains, retraction under serving load and original-row output-logprob checks are also in
-  progress. The sampled cap-64 path is refused.
+- Some request features are limits of the TokenSpeed engine, with or without speculation:
+  - Prompt logprobs: a request with `logprob_start_len` 0 returns output-token logprobs only. Top-k logprobs need
+    `max_new_tokens` of 1. Output-token logprobs match the engine without speculation (see the support matrix).
+  - Sampling filters: with FlashInfer sampling, top-k/top-p and min-p cut the distribution where the engine's own
+    sampler cuts it, which is not where SGLang cuts it. The sampled-distribution check therefore covers
+    temperature, unrestricted and penalty settings; for top-k/top-p and min-p only its per-token tests apply.
+  - Sampling stream: with FlashInfer sampling and a draft tree, TokenSpeed refuses `--sampling-stream per-request`,
+    because its tree verifier draws one random stream for the batch. Use `--sampling-stream batch`, or chains.
+  - Draft trees run at most 32 requests at a time: the engine sizes its tree buffers for 32. Chains run up to 512.
+  - Native no-speculation rounds: TokenSpeed has no hook that skips the draft for a batch yet, so EAGLE-4 cannot
+    fall back to plain decoding at high load on TokenSpeed ([high load](#high-load)). A zero-draft speculative round
+    is not a native no-speculation round.
+  - Live cost measurement: serve mode reads cost tables measured for TokenSpeed.
+- Serve mode needs cost tables measured for TokenSpeed. Tree and chain cost data should match the served shape, TP
+  size, target, draft and recurrent-state dtype. Only TP4 tables exist; the TP1 measurements reuse them.
+- Retraction is not qualified. TokenSpeed reserves pages when it admits a request and queues the rest, so the
+  measured servers never retract. With retractions forced by a test-only setting, one prompt in three chain starts
+  fails the fp32 rule ([support matrix](support-matrix.md#012-correctness-and-request-features)).
+- EAGLE-3 drafts are not checked on TokenSpeed. TP8 is not measured on 0.1.2 (the
+  [candidate rows](support-matrix.md#candidate-speed-by-engine-and-concurrency) have earlier results). TP4
+  single-request optimization is in progress.
 - Static mode is a setup check, because its CUDA install smoke generates text with one first divergence above the
   fp32 gate. The serve-mode install smoke passes its greedy prompts with the CUDA 13.2 JIT. On Ubuntu 26.04 / glibc
   2.43, set `CUDA_HOME` to CUDA 13.2 ([troubleshooting](troubleshooting.md#install-problems)). These checks cover

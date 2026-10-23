@@ -73,7 +73,7 @@ do not establish distribution equivalence for every model and workload.
 
 Logprobs are supported on SGLang and vLLM. Each request gets the logprobs of its accepted tokens. SGLang
 input logprobs come from its prefill. Use the matching engine with the FlashInfer verify-wrapper graph fix.
-TokenSpeed refuses prompt logprobs ([known limits](known-limits.md#tokenspeed)).
+TokenSpeed returns no prompt logprobs ([known limits](known-limits.md#tokenspeed)).
 
 Requests with images are refused with a reason on sglang.
 

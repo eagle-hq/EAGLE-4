@@ -233,6 +233,11 @@ measured between 0.98× and 1.07× the 0.1.1 packages in every cell where both r
 | SGLang TP1, quick-start command | ✅ 2.87× | ✅ 1.87× | ⚠️ 0.73× |
 | vLLM TP4 | ✅ 2.83× | ✅ 1.73× | ⚠️ 1.19× |
 | TokenSpeed TP4 | ✅ 3.13× | ✅ 2.00× | ✅ 1.40× |
+| TokenSpeed TP4, 32K-token context | ✅ 3.15× | — | — |
+| TokenSpeed TP1 | ✅ 3.27× | ✅ 2.14× | ✅ 1.35× |
+| TokenSpeed TP4 chain, temperature 0 | ✅ 2.24× | ✅ 1.65× | ✅ 1.02× |
+| TokenSpeed TP4 chain, temperature 1 | ✅ 2.19× | ✅ 1.71× | ✅ 1.12× |
+| TokenSpeed TP4 sampled tree, temperature 1 | ✅ 2.48× | ✅ 1.74× | ⚠️ 0.87× |
 
 Sources:
 
@@ -256,6 +261,23 @@ Sources:
    Eleven first turns with up to 256 tokens give 819.7 against 280.7 (2.92×). Concurrency 8 and 64 use 22 and 88
    first turns with up to 256 tokens: 3256.4 against 1628.2 and 6974.1 against 4969.8. Every start gives 6 exact /
    14 fp32 pass.
+6. TokenSpeed TP4, 32K: the same server at running cap 4, one 32,768-token prompt with 256 new tokens, a warm
+   request and 3 measured requests per start, 2 starts per arm. 812.1 against 258.0 decode tokens/s (first to last
+   streamed token). Every start gives 6 exact / 14 fp32 pass.
+7. TokenSpeed TP1: the TP4 recipe on one GPU with the TP4 cost tables (no TP1 tables exist yet), same workloads
+   and running caps, 2 starts per arm. 352.5 against 107.9 tokens/s at 1, and 323.4 against 106.9 (3.03×) on eleven
+   first turns. 1378.8 against 643.3 at 8 and 2620.4 against 1944.7 at 64. Every start passes the twenty-prompt
+   check (5 exact / 15 fp32 pass at running cap 4, 3 exact / 17 fp32 pass at 32).
+8. TokenSpeed TP4 chains: one chain per request (7 draft steps, 8 tokens, chain widths 8 from 1 request and 4 from
+   32), FlashInfer sampling with the batch stream and speculative sampling on, running cap 64, against no-spec with
+   the same sampler and cap, 2 starts per arm. 11, 22 and 88 first turns with up to 256 tokens. Temperature 0:
+   605.4, 2591.7 and 6384.3 against 270.8, 1567.1 and 6271.5 tokens/s. Temperature 1: 563.8, 2512.9 and 6541.6
+   against 258.0, 1473.3 and 5824.0. Every twenty-prompt check gives 3 exact / 17 fp32 pass.
+9. TokenSpeed TP4 sampled tree: the serve-mode tree with the same sampler and speculative sampling, running cap 32
+   (the most a draft tree runs), against no-spec at running cap 64, same workloads, 2 starts per arm: 639.8, 2560.6
+   and 5106.2 against 257.8, 1473.5 and 5839.7 tokens/s. At 64 the tree serves 32 requests at a time and the rest
+   queue; chains run all 64. At temperature 0 the same servers measure 2.65×, 1.77× and 0.87×. Every twenty-prompt
+   check gives 7 exact / 13 fp32 pass.
 
 ### 0.1.2 high load
 
@@ -293,9 +315,28 @@ Sources:
 | Change | Result |
 |---|---|
 | `eagle-harness calibrate --engine vllm` completes on the Qwen3.8 hybrid target, and its `serve.sh` loads the tables it wrote | ✅ 20/20 |
+| TokenSpeed TP4 chain, 64 prompts with up to 512 tokens at 64 concurrent requests, fp32 rule | ✅ 0 failed in 2 starts |
+| TokenSpeed TP4 output-token logprobs, chain and sampled tree, against no-spec on the shared greedy prefix | ✅ largest gap 0.113 |
+| TokenSpeed TP4 sampled-output distribution, chain and sampled tree, temperature 1 | ✅ unrestricted, temperature, penalty |
+| TokenSpeed TP4 sampled-output distribution with top-k/top-p or min-p | ⚠️ engine filters |
+| TokenSpeed TP4 chain with retractions forced every 16 scheduler rounds, 64 prompts at 64, fp32 rule | ❌ 1 failed in 3 starts |
 
 The calibration ran on B300 TP4 with the 0.1.1 vLLM engine. Both the printed `serve.sh` and the quickstart command
 pass the twenty-prompt check (4 exact / 15 near tie / 1 fp32 pass), 1 start each. No speed is claimed for it.
+
+The TokenSpeed rows use the chain and sampled-tree servers of the speed table. At 64 concurrent requests the chain
+gives 11 and 10 exact / 53 and 54 fp32 pass over 64 prompts, and the engine without speculation gives 11 exact /
+53 fp32 pass against its own first start. Output-token logprobs cover 8 prompts with up to 128 tokens (755 chain
+and 706 tree positions, mean gap 0.006). The distribution check draws 1000 samples per prompt for each setting
+(`tools/sampling_check.py --api tokenspeed`) and passes for unrestricted, temperature and repetition-penalty
+settings. With top-k/top-p and min-p, every per-token test passes, but the engine without speculation also draws
+tokens outside the cuts the check models, so these settings are not qualified
+([known limits](known-limits.md#tokenspeed)).
+The retraction row uses TokenSpeed's test-only `--debug-force-retraction-interval 16` (51 to 56 retractions per
+start, every request completes): one prompt in one start picks the second fp32 token 4.6 BF16 steps below the first.
+The engine without speculation under the same setting gives 0 failures in 1 start. Without that setting the
+servers above never retract: TokenSpeed reserves pages when it admits a request and queues the rest, also with a
+20,480-token pool.
 
 ## Unreleased (measured on candidates, not in a release)
 
@@ -307,7 +348,6 @@ A row joins a release only after it passes the release qualification.
 | Change, engine and setup | 1 | 8 | 32 | 64 |
 |---|---|---|---|---|
 | vLLM TP1, served-tree rounds measured on the setup | — | ✅ 1.94× | — | ✅ 1.07× |
-| TokenSpeed TP1, serve mode | ⚠️ 3.22× | ⚠️ 2.34× | — | — |
 | TokenSpeed TP8, serve mode | ⚠️ 2.79× | ⚠️ 1.68× | — | — |
 | SGLang ROCm MI355X TP1, draft attention splits sized per batch | — | ⚠️ 2.21× | ⚠️ 1.66× | — |
 
@@ -317,12 +357,12 @@ Sources:
    the served setup (no TP1 schedule ships). Running cap 64, unchanged vLLM engine, 88 and 220 first turns with up
    to 512 new tokens. 1366.5 against 705.4 tokens/s at 8 and 3402.4 against 3192.6 at 64, 3 starts per arm
    interleaved in one allocation. The 64-prompt checks at 64 give 0 failures in 4 pairs (1 fp32 pass).
-2. TokenSpeed TP1 and TP8: the 0.1.0 TokenSpeed wheels with the pre-0.1.1 adapter, serve mode with the TP4 cost
-   tables (no TP-matched tables exist yet). Concurrency 1 is 22 conversations and 31 turns: TP1 346.5 against
-   107.6 tokens/s, TP8 962.1 against 345.4. Concurrency 8 is 88 first turns: TP1 1685.3 against 721.3, TP8 3916.6
-   against 2337.9. Each cell has 2 starts per arm. The first start's twenty-prompt check passes (TP1 3 exact /
-   17 fp32 pass, TP8 5 exact / 14 fp32 pass / 1 fp32-argmax pass), and the second start's check was not collected.
-   Static mode refuses this tree at TP1 and TP8.
+2. TokenSpeed TP8: the 0.1.0 TokenSpeed wheels with the pre-0.1.1 adapter, serve mode with the TP4 cost tables
+   (no TP-matched tables exist yet). Concurrency 1 is 22 conversations and 31 turns: 962.1 against 345.4 tokens/s.
+   Concurrency 8 is 88 first turns: 3916.6 against 2337.9. Each cell has 2 starts per arm. The first start's
+   twenty-prompt check passes (5 exact / 14 fp32 pass / 1 fp32-argmax pass), and the second start's check was not
+   collected. Static mode refuses this tree at TP1 and TP8. TP1 on 0.1.2 is in the
+   [0.1.2 table](#012-speed-by-engine-and-concurrency).
 3. MI355X: draft attention key splits sized from the batch's programs, on the 0.1.0 ROCm engine, 44 conversations
    and 60 turns. 1202.7 against 545.2 tokens/s at 8 and 2201.8 against 1330.3 at 32 (2 EAGLE-4 starts, 1 no-spec
    start), and every MI355X check passes. The same change on B300 TP4 has one twenty-prompt failure in its first
@@ -390,8 +430,7 @@ Sources:
 5. SGLang TP8 concurrency 8: prefill admission and intermittent stalls.
 6. SGLang 32K-context acceptance.
 7. SGLang greedy agreement at concurrency 512.
-8. TokenSpeed: the candidate draft head, temperature 1 and 32K contexts, the sampled-output distribution and
-   prompt logprobs.
+8. TokenSpeed: the candidate draft head and TP8 on 0.1.2.
 9. AMD MI355X at concurrency 64.
 10. Nemotron 3.5 Super correctness qualification on all three engines.
 

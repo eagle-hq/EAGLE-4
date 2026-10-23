@@ -1,7 +1,7 @@
 ---
 type: tutorial
 owner: eagle-harness
-last_verified: 2026-10-21
+last_verified: 2026-10-23
 ---
 
 # TokenSpeed guide
@@ -65,5 +65,45 @@ promises a speedup for your workload. The serve-mode check passed twenty greedy 
 fp32-tolerance results. These are first-divergence checks, not bitwise output equality or sampled-distribution
 qualification.
 
-Prompt logprobs, per-request sampled trees, live cost measurement and native no-speculation rounds are not
-supported. The [known limits](known-limits.md#tokenspeed) list the rest.
+The same command serves one GPU with `--tensor-parallel-size 1` (it reuses the TP4 tables; no TP1 tables exist
+yet) and 32K-token prompts within `--max-model-len 65536`. The
+[support matrix](support-matrix.md#012-speed-by-engine-and-concurrency) has one row per setup.
+
+## Sampled requests
+
+For temperature above 0, sample with FlashInfer, one random stream per batch, and speculative sampling. A draft
+tree runs at most 32 requests at a time:
+
+```bash
+tokenspeed serve Qwen/Qwen3.8-27B --tensor-parallel-size 4 \
+  --attention-backend trtllm --max-model-len 65536 --max-num-seqs 32 \
+  --disable-kvstore --seed 721 --gpu-memory-utilization 0.6 --disable-prefix-caching \
+  --reasoning-parser qwen3 --sampling-backend flashinfer --sampling-stream batch \
+  --speculative-algorithm EAGLE_HARNESS \
+  --speculative-draft-model-path EAGLE-Corp/Qwen3.8-27B-EAGLE4 \
+  --speculative-num-steps 12 --speculative-eagle-topk 4 --speculative-num-draft-tokens 16 \
+  --speculative-algorithm-config "{\"mode\": \"serve\", \"data_path\": \"$COST_ROOT\"}" \
+  --enable-speculative-sampling
+```
+
+To run more than 32 requests at a time, serve chains, which need no cost tables:
+
+```bash
+tokenspeed serve Qwen/Qwen3.8-27B --tensor-parallel-size 4 \
+  --attention-backend trtllm --max-model-len 65536 --max-num-seqs 64 \
+  --disable-kvstore --seed 721 --gpu-memory-utilization 0.6 --disable-prefix-caching \
+  --reasoning-parser qwen3 --sampling-backend flashinfer --sampling-stream batch \
+  --speculative-algorithm EAGLE_HARNESS \
+  --speculative-draft-model-path EAGLE-Corp/Qwen3.8-27B-EAGLE4 \
+  --speculative-num-steps 7 --speculative-eagle-topk 1 --speculative-num-draft-tokens 8 \
+  --speculative-algorithm-config '{"mode": "serve", "intensity": "chain_intensity", "chain_width_table": [[1, 8], [32, 4]]}' \
+  --enable-speculative-sampling
+```
+
+At 64 concurrent requests the chain server measured 1.12× its no-spec
+control at temperature 1, the tree server 0.87×. `tools/sampling_check.py run --api tokenspeed` compares a sampled
+server with a no-spec server; top-k/top-p and min-p follow TokenSpeed's own filters
+([known limits](known-limits.md#tokenspeed)).
+
+Prompt logprobs, per-request sampling streams with draft trees, live cost measurement and native no-speculation
+rounds are not supported. The [known limits](known-limits.md#tokenspeed) list the rest.
