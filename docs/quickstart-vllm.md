@@ -26,7 +26,7 @@ Or run the published image, which has the engine and EAGLE-4 installed and start
 ```bash
 docker run --gpus all --ipc host -p 127.0.0.1:8000:8000 \
   -e HF_HOME=/hf -v ~/.cache/huggingface:/hf -e VLLM_USE_V2_MODEL_RUNNER=1 \
-  ghcr.io/eagle-hq/eagle-4-vllm:0.1.1 \
+  ghcr.io/eagle-hq/eagle-4-vllm:0.1.2 \
   Qwen/Qwen3.8-27B \
   --attention-backend CUSTOM --linear-backend flashinfer_cutedsl \
   --speculative-config '{"method": "eagle_harness", "model": "EAGLE-Corp/Qwen3.8-27B-EAGLE4", "method_config": {"mode": "static", "node_top_k": 4, "tree_depth": 14, "max_verify_width": 16}}'

@@ -74,14 +74,14 @@ wheel hash for the SGLang image build.
 
 ## Docker images
 
-Each image has one patched engine and `eagle-harness` 0.1.1 installed. The engine guides show the `docker run`
+Each image has one patched engine and `eagle-harness` 0.1.2 installed. The engine guides show the `docker run`
 command for each one.
 
 | Engine | Image |
 | --- | --- |
-| SGLang CUDA | `ghcr.io/eagle-hq/eagle-4-sglang:0.1.1` |
-| vLLM CUDA | `ghcr.io/eagle-hq/eagle-4-vllm:0.1.1` |
-| TokenSpeed CUDA | `ghcr.io/eagle-hq/eagle-4-tokenspeed:0.1.1` |
+| SGLang CUDA | `ghcr.io/eagle-hq/eagle-4-sglang:0.1.2` |
+| vLLM CUDA | `ghcr.io/eagle-hq/eagle-4-vllm:0.1.2` |
+| TokenSpeed CUDA | `ghcr.io/eagle-hq/eagle-4-tokenspeed:0.1.2` |
 | SGLang ROCm | not published, [build it](#build-the-rocm-image) |
 
 To run a newer `eagle-harness` in an image, run `pip install -U eagle-harness` inside the container.

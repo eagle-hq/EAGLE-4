@@ -25,7 +25,7 @@ Or run the published image, which has the engine and EAGLE-4 installed:
 ```bash
 docker run --gpus all --ipc host -p 127.0.0.1:30000:30000 \
   -e HF_HOME=/hf -v ~/.cache/huggingface:/hf \
-  ghcr.io/eagle-hq/eagle-4-sglang:0.1.1 \
+  ghcr.io/eagle-hq/eagle-4-sglang:0.1.2 \
   sglang serve --model-path Qwen/Qwen3.8-27B --host 0.0.0.0 \
   --disable-overlap-schedule --speculative-algorithm EAGLE_HARNESS \
   --speculative-draft-model-path EAGLE-Corp/Qwen3.8-27B-EAGLE4 \
