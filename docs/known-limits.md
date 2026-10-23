@@ -51,7 +51,11 @@ to 512 concurrent requests. These limits apply around it:
 - Greedy agreement at 64 and 512 concurrent requests is checked with the fp32 rule, not claimed. At 64, one prompt
   takes another token at one position in 3 of 12 EAGLE-4 starts, a prefix where the engine without speculation
   emits the same token under another batch shape. At 512, the engine without speculation also differs between its
-  own starts. Every twenty-prompt check passes.
+  own starts and between batch sizes: 3 and 1 of 512 prompts fall outside the 2-ULP rule, up to 3.8 bf16 ULP. Its
+  default kernels are not batch-invariant. EAGLE-4 decodes without speculation at this load, and its differences
+  fall on the same prompts. With `--enable-deterministic-inference` on both servers, restarts and three EAGLE-4
+  starts match token for token at 512 (512 of 512 prompts). In that mode EAGLE-4 decodes without speculation at 64
+  and 512, so it gives no speedup there, and the mode lowers throughput. Every twenty-prompt check passes.
 - vLLM and TokenSpeed do not switch to plain decoding at high load yet. Above concurrency 64 they can be slower
   with speculation than without it, so serve those loads without speculation for now. The switch is planned for
   both engines.
@@ -76,7 +80,9 @@ to 512 concurrent requests. These limits apply around it:
 - vLLM TP4 at concurrency 64: in a 64-prompt greedy comparison against no-spec, one prompt can take another token
   at one position, up to 5.4 bf16 ULP from the fp32 choice, beyond the 2-ULP rule. It appeared in 3 of 6 EAGLE-4
   starts with 0.1.1 and in 2 of 6 with 0.1.0, and 0.1.2 shows it too (the vLLM engine is the same); the other
-  prompts and every twenty-prompt check at concurrency 1 pass. The cause is being investigated.
+  prompts and every twenty-prompt check at concurrency 1 pass. vLLM without speculation emits the same token at
+  that prefix when 64 sequences share the batch (up to 19 of 64 identical copies in one batch), so the difference
+  comes from the engine's batch-dependent numerics, not from tree verification.
 - AMD measurements apply to the MI355X TP1 Qwen3.8 profile. On one MI355X the speedup covers concurrency up
   to 32; concurrency 64 is being optimized, so serve it without speculation for now. HIP side-stream prelaunch
   stays off: its replay check passes and it measured no throughput gain on MI355X. Further target, draft and
@@ -88,9 +94,11 @@ to 512 concurrent requests. These limits apply around it:
   benchmark results. A cap of 512 is an admission limit, not a claim of acceleration or correctness at that load.
 - SGLang supports accepted-token and input logprobs with the required host hooks. Images are refused.
 - vLLM tree verification needs an unquantized KV cache. The target's sampling restrictions still apply.
-  Sampling smoke tests check the path, not distribution equivalence on every workload. The vLLM
-  sampled-distribution check covers temperature 1 with top-p 1 and no top-k; other temperatures, top-k/top-p
-  and penalties are being qualified. vLLM refuses `min_p` and `logit_bias` with speculative decoding.
+  Sampling smoke tests check the path, not distribution equivalence on every workload. On TP4 at concurrency 1,
+  8 and 64, the vLLM tree's sampled tokens match the engine without speculation at temperature 1 and 0.7, with
+  top-k 8 and top-p 0.7, with a repetition penalty of 1.5, and with frequency and presence penalties of 0.5 (two
+  tree starts against three starts without speculation, chi-square tests at a 1 % family-wise level). vLLM
+  refuses `min_p` and `logit_bias` with speculative decoding.
 - Structured output and tool calls require the model's engine parser. Raw tool syntax in text is not a structured
   response. In a vLLM tree batch with a grammar constraint, every request in the batch advances one token per
   verify round. Check finish reasons and validate the completed output.
