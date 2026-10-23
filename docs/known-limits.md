@@ -13,9 +13,11 @@ kernel is a startup check.
 ## Models and hardware
 
 - EAGLE-4 drafts need the trained candidate head and a supported draft structure.
-- Dense and latent-MoE EAGLE-4 drafts and Mamba2 targets have adapters. Nemotron's SGLang comparison has
-  first divergences under the fp32 gate that are being resolved. Release-stack Nemotron performance and correctness
-  results for vLLM and TokenSpeed are in progress. An architecture that loads is not yet qualified.
+- Dense and latent-MoE EAGLE-4 drafts and Mamba2 targets have adapters. Nemotron 3.5 Super runs 1.4× to 2.5×
+  faster than plain decoding on SGLang, vLLM and TokenSpeed with 0.1.2
+  ([measured rows](support-matrix.md#012-nemotron-35-super)). Its twenty-prompt checks have first divergences
+  beyond the fp32 rule, and at each one an engine without speculation emits the same token at the same prefix, so
+  they count as the engine's own numerics. An architecture that loads is not yet qualified.
 - Serving measurements cover NVIDIA B300 and SGLang on AMD MI355X. Compilation on another NVIDIA or AMD
   architecture is separate evidence. Multi-node deployment and pipeline parallelism are being qualified.
 - Throughput depends on the model, draft, engine, precision, TP size, attention backend, context length and

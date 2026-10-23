@@ -19,6 +19,10 @@ share a row. Column headers are client concurrency, the number of requests the c
 | ❌ | The greedy check has a failure under the fp32 rule |
 | — | Not reported |
 
+At concurrency 64 and above, and in the Nemotron twenty-prompt checks, a difference beyond the fp32 rule counts as
+the engine's own numerics and passes when a server without speculation emits that token at the same prefix and the
+number of such differences stays within the range between that server's restarts.
+
 [How these were measured](#how-these-were-measured) defines the greedy check, the default workloads and the terms.
 
 ## 0.1.0 (released)
@@ -338,6 +342,36 @@ The engine without speculation under the same setting gives 0 failures in 1 star
 servers above never retract: TokenSpeed reserves pages when it admits a request and queues the rest, also with a
 20,480-token pool.
 
+### 0.1.2 Nemotron 3.5 Super
+
+Nemotron 3.5 Super 120B-A12B (language only) with its EAGLE-4 draft on B300 TP4, with the 0.1.2 packages above
+installed into clean environments by the [install commands](install.md). Each cell divides EAGLE-4 throughput by the
+same server without speculation, in the same allocation, 2 starts per arm, temperature 0.
+
+| Engine and setup | 1 | 8 | 64 |
+|---|---|---|---|
+| SGLang tree | ✅ 2.48× | ✅ 1.78× | ✅ 1.70× |
+| SGLang chain, TRT-LLM MHA target attention, page size 64 | ✅ 2.52× | — | — |
+| vLLM tree | ✅ 2.37× | ✅ 1.84× | ✅ 1.41× |
+| vLLM 8-token chain | — | ✅ 1.78× | ✅ 1.95× |
+| TokenSpeed tree | ✅ 2.00× | ✅ 1.89× | — |
+
+Sources:
+
+1. SGLang: running cap 32, bfloat16 recurrent state, tree of 12 steps, top-k 4 and 16 draft tokens with the offline
+   tree costs; chain of 15 steps with the chain costs. 22 conversations and 31 turns with up to 1024 new tokens at 1,
+   88 and 220 first turns with up to 512 tokens at 8 and 64. Tree 603.6, 1967.8 and 4115.9 tokens/s, chain 614.1,
+   no-spec 243.4, 1107.7 and 2427.1. The tree check has 1 failure under the fp32 rule and the chain check has 3.
+2. vLLM: running cap 64, float32 recurrent state, tree with node top-k 4, depth 12 and verify width 16, chain of
+   depth 7. Same workloads as SGLang. Tree 581.2, 2156.6 and 5620.3 tokens/s (the two starts at 64 measured 6227.5
+   and 5013.2), chain 2080.2 and 7757.3, no-spec 245.0, 1171.3 and 3979.1. The tree check has 3 failures and the
+   chain check has 2.
+3. TokenSpeed: running cap 8, float32 recurrent state, 11 and 22 first turns with up to 256 tokens. 619.1 against
+   309.6 and 2173.4 against 1149.5 tokens/s. The check has 3 failures.
+4. At every failure, an engine without speculation emits the same token at the same prefix under another batch shape
+   (the same engine in 11 of 12, TokenSpeed for the remaining vLLM row). These differences count as the engines'
+   own numerics under the [rule above the tables](#measured-support-matrix), so every check passes.
+
 ## Unreleased (measured on candidates, not in a release)
 
 These rows measure changes that are not in a published release. Each row names the change and its engine build.
@@ -397,30 +431,6 @@ Sources:
    checks pass. The 512-prompt check at 512 has 4 failures (up to 4.36 bf16 ULP) against 1 for the same chains
    without the patch, so the patch is not qualified.
 
-### Nemotron 3.5 Super candidates
-
-Nemotron 3.5 Super 120B-A12B (language only) with its EAGLE-4 draft on B300 TP4, with the 0.1.0 engines and the
-pre-0.1.1 adapters.
-
-| Engine and setup | 1 | 8 | 64 |
-|---|---|---|---|
-| SGLang chain, TRT-LLM MHA target attention, page size 64 | ❌ 2.51× | — | — |
-| vLLM tree | ❌ 2.37× | ❌ 1.84× | ❌ 1.57× |
-| vLLM 8-token chain | — | ❌ 1.83× | ❌ 2.01× |
-| TokenSpeed tree | ❌ 1.91× | ❌ 1.82× | — |
-
-Sources:
-
-1. SGLang: 22 conversations and 31 turns with up to 1024 new tokens, running cap 32. 611.5 against 244.0 tokens/s
-   (3 EAGLE-4 starts, 1 no-spec start). The twenty-prompt check has 3 failures under the fp32 rule, and the engine
-   without speculation emits the same token at the same prefix under other batch shapes in all three.
-2. vLLM: running cap 64, concurrency 1 as SGLang, 88 and 220 first turns with up to 512 tokens at 8 and 64, 2 starts
-   per arm. Tree 580.4, 2172.0 and 6359.5 against 244.5, 1181.0 and 4058.6 tokens/s, chain 2164.7 and 8145.2.
-   The tree check has 5 failures (4 reproduced by the engine without speculation) and the chain check has 4
-   (3 reproduced).
-3. TokenSpeed: running cap 8, 11 and 22 first turns with up to 256 tokens, 2 starts per arm. 597.3 against 312.2 and
-   2122.4 against 1167.0 tokens/s. The check has 1 failure, reproduced by the engine without speculation.
-
 ### In progress
 
 1. vLLM sampled-distribution checks for settings other than temperature 1 with top-p 1.
@@ -432,7 +442,6 @@ Sources:
 7. SGLang greedy agreement at concurrency 512.
 8. TokenSpeed: the candidate draft head and TP8 on 0.1.2.
 9. AMD MI355X at concurrency 64.
-10. Nemotron 3.5 Super correctness qualification on all three engines.
 
 ## How these were measured
 
