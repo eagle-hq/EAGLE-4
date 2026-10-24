@@ -164,6 +164,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     base = f"http://127.0.0.1:{args.port}"
     model = requests.get(f"{base}/v1/models", timeout=60).json()["data"][0]["id"] if args.api != "sglang" else None
     turns = first_turns(args.data, args.concurrency * args.waves)
+    if len(turns) < args.concurrency * args.waves:
+        raise SystemExit(
+            f"{args.data} has {len(turns)} conversations; --concurrency {args.concurrency} x --waves {args.waves} "
+            f"needs {args.concurrency * args.waves}"
+        )
     prompts = [
         tokenizer.encode(
             tokenizer.apply_chat_template(
