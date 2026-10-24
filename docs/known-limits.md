@@ -16,9 +16,8 @@ kernel is a startup check.
 - Dense and latent-MoE EAGLE-4 drafts and Mamba2 targets have adapters. Nemotron 3.5 Super runs 1.4× to 2.5×
   faster than plain decoding on SGLang, vLLM and TokenSpeed with 0.1.2
   ([measured rows](support-matrix.md#012-nemotron-35-super)). Its twenty-prompt checks have first divergences
-  beyond the fp32 rule. At all but one, the same engine without speculation emits the same token at the same prefix,
-  so they count as the engine's own numerics. The remaining one is on the vLLM tree, whose cells are marked ⚠️ until
-  vLLM without speculation settles it. An architecture that loads is not yet qualified.
+  beyond the fp32 rule. At each one, the same engine without speculation emits the same token at the same prefix,
+  so they count as the engine's own numerics. An architecture that loads is not yet qualified.
 - Serving measurements cover NVIDIA B300 and SGLang on AMD MI355X. Compilation on another NVIDIA or AMD
   architecture is separate evidence. Multi-node deployment and pipeline parallelism are being qualified.
 - Throughput depends on the model, draft, engine, precision, TP size, attention backend, context length and

@@ -352,7 +352,7 @@ same server without speculation, in the same allocation, 2 starts per arm, tempe
 |---|---|---|---|
 | SGLang tree | ✅ 2.48× | ✅ 1.78× | ✅ 1.70× |
 | SGLang chain, TRT-LLM MHA target attention, page size 64 | ✅ 2.52× | — | — |
-| vLLM tree | ⚠️ 2.37× | ⚠️ 1.84× | ⚠️ 1.41× |
+| vLLM tree | ✅ 2.37× | ✅ 1.84× | ✅ 1.41× |
 | vLLM 8-token chain | — | ✅ 1.78× | ✅ 1.95× |
 | TokenSpeed tree | ✅ 2.00× | ✅ 1.89× | — |
 
@@ -368,11 +368,11 @@ Sources:
    chain check has 2.
 3. TokenSpeed: running cap 8, float32 recurrent state, 11 and 22 first turns with up to 256 tokens. 619.1 against
    309.6 and 2173.4 against 1149.5 tokens/s. The check has 3 failures.
-4. At 11 of the 12 failures, the same engine without speculation emits the same token at the same prefix under
-   another batch shape. These differences count as the engines' own numerics under the
-   [rule above the tables](#measured-support-matrix), so those checks pass.
-5. vLLM tree: one of its 3 failures (2.04 bf16 ULP) is reproduced by TokenSpeed without speculation but not yet by
-   vLLM without speculation, so it does not meet the rule and the vLLM tree cells are marked ⚠️.
+4. At every failure, the same engine without speculation emits the same token at the same prefix under another
+   batch shape. These differences count as the engines' own numerics under the
+   [rule above the tables](#measured-support-matrix), so every check passes.
+5. vLLM tree: at one of its 3 failures (2.04 bf16 ULP), vLLM without speculation emits the tree's token when it
+   decodes the prefix itself, as 1, 8 or 64 copies in one batch; there the two tokens tie in bfloat16 logprobs.
 
 ## Unreleased (measured on candidates, not in a release)
 
