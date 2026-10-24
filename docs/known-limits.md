@@ -132,13 +132,11 @@ temperature 0 and 1, 32K-token contexts and four-GPU chains
     is not a native no-speculation round.
   - Live cost measurement: serve mode reads cost tables measured for TokenSpeed.
 - Serve mode needs cost tables measured for TokenSpeed. Tree and chain cost data should match the served shape, TP
-  size, target, draft and recurrent-state dtype. Only TP4 tables exist; the TP1 measurements reuse them.
+  size, target, draft and recurrent-state dtype. Only TP4 tables exist; the TP1 and TP8 measurements reuse them.
 - Retraction is not qualified. TokenSpeed reserves pages when it admits a request and queues the rest, so the
   measured servers never retract. With retractions forced by a test-only setting, one prompt in three chain starts
   fails the fp32 rule ([support matrix](support-matrix.md#012-correctness-and-request-features)).
-- EAGLE-3 drafts are not checked on TokenSpeed. TP8 is not measured on 0.1.2 (the
-  [candidate rows](support-matrix.md#candidate-speed-by-engine-and-concurrency) have earlier results). TP4
-  single-request optimization is in progress.
+- EAGLE-3 drafts are not checked on TokenSpeed. TP4 single-request optimization is in progress.
 - Static mode is a setup check, because its CUDA install smoke generates text with one first divergence above the
   fp32 gate. The serve-mode install smoke passes its greedy prompts with the CUDA 13.2 JIT. On Ubuntu 26.04 / glibc
   2.43, set `CUDA_HOME` to CUDA 13.2 ([troubleshooting](troubleshooting.md#install-problems)). These checks cover
