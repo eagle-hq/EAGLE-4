@@ -99,3 +99,11 @@ def test_reject_invalid_asset_base(tmp_path, base_url):
     assert result.returncode != 0
     assert "HTTPS URL without credentials, query or fragment" in result.stderr
     assert not (tmp_path / "index").exists()
+
+
+def test_empty_index_writes_root_page(tmp_path):
+    root = tmp_path / "index"
+    result = run_index(root)
+    assert result.returncode == 0, result.stderr
+    assert Links((root / "simple/index.html").read_text()).links == []
+    assert (root / "SHA256SUMS").read_text() == ""
