@@ -62,9 +62,10 @@ def add_notices(source: Path, destination: Path, build: str, notices: dict[str, 
             raise ValueError("wheel already has a build tag")
         meta_text = original.read(metadata).decode()
         head, separator, body = meta_text.partition("\n\n")
-        head += "".join(f"\nLicense-File: {name}" for name in notices)
+        # A METADATA without a description has no blank line: keep the new headers out of a body.
+        head = head.rstrip("\n") + "".join(f"\nLicense-File: {name}" for name in notices)
         changes = {
-            metadata: (head + separator + body).encode(),
+            metadata: (head + (separator + body if separator else "\n")).encode(),
             wheel: (wheel_text.rstrip("\n") + f"\nBuild: {build}\n").encode(),
         }
         payload, rows = {}, []
