@@ -20,8 +20,8 @@ share a row. Column headers are client concurrency, the number of requests the c
 | — | Not reported |
 
 At concurrency 64 and above, and in the Nemotron twenty-prompt checks, a difference beyond the fp32 rule counts as
-the engine's own numerics and passes when a server without speculation emits that token at the same prefix and the
-number of such differences stays within the range between that server's restarts.
+the engine's own numerics and passes when the same engine without speculation, in the same job, emits that token at
+the same prefix and the number of such differences stays within the range between that engine's restarts.
 
 [How these were measured](#how-these-were-measured) defines the greedy check, the default workloads and the terms.
 
@@ -352,7 +352,7 @@ same server without speculation, in the same allocation, 2 starts per arm, tempe
 |---|---|---|---|
 | SGLang tree | ✅ 2.48× | ✅ 1.78× | ✅ 1.70× |
 | SGLang chain, TRT-LLM MHA target attention, page size 64 | ✅ 2.52× | — | — |
-| vLLM tree | ✅ 2.37× | ✅ 1.84× | ✅ 1.41× |
+| vLLM tree | ⚠️ 2.37× | ⚠️ 1.84× | ⚠️ 1.41× |
 | vLLM 8-token chain | — | ✅ 1.78× | ✅ 1.95× |
 | TokenSpeed tree | ✅ 2.00× | ✅ 1.89× | — |
 
@@ -368,9 +368,11 @@ Sources:
    chain check has 2.
 3. TokenSpeed: running cap 8, float32 recurrent state, 11 and 22 first turns with up to 256 tokens. 619.1 against
    309.6 and 2173.4 against 1149.5 tokens/s. The check has 3 failures.
-4. At every failure, an engine without speculation emits the same token at the same prefix under another batch shape
-   (the same engine in 11 of 12, TokenSpeed for the remaining vLLM row). These differences count as the engines'
-   own numerics under the [rule above the tables](#measured-support-matrix), so every check passes.
+4. At 11 of the 12 failures, the same engine without speculation emits the same token at the same prefix under
+   another batch shape. These differences count as the engines' own numerics under the
+   [rule above the tables](#measured-support-matrix), so those checks pass.
+5. vLLM tree: one of its 3 failures (2.04 bf16 ULP) is reproduced by TokenSpeed without speculation but not yet by
+   vLLM without speculation, so it does not meet the rule and the vLLM tree cells are marked ⚠️.
 
 ## Unreleased (measured on candidates, not in a release)
 
