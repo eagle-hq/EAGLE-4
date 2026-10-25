@@ -66,7 +66,7 @@ do not establish distribution equivalence for every model and workload.
   repetition, frequency or presence penalties, bad words, a thinking budget or a custom logits processor is
   verified as chains using the host rejection sampler, which can accept fewer tokens. This fallback is not a
   claim of token-identical output across different numerical execution shapes.
-- sglang: sampled requests go through sglang's own tree speculative sampling. min-p, and top-k together with top-p,
+- sglang: sampled requests go through sglang's own tree speculative sampling. min-p and top-k together with top-p
   need an sglang build with the verify filter fix: older builds ignore min-p in verify and cut top-p after top-k.
   Penalties use sglang's relaxed form (counts of committed tokens only), as in sglang's own EAGLE, so they are not
   exact. Seeds need `--enable-deterministic-inference`.
