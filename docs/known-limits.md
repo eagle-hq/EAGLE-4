@@ -64,7 +64,7 @@ to 512 concurrent requests. These limits apply around it:
 
 ## Performance and correctness in progress
 
-- SGLang TP4 single-request and 32K-context optimization is in progress, as is TP8 concurrency-8 prefill
+- SGLang TP4 single-request and 32K-context optimization is in progress, as are TP8 concurrency-8 prefill
   overhead and intermittent stalls. Repeated passes in one process are not independent server starts.
 - SGLang native-OFF, including OFF forced by a cost profile, uses the engine's per-variant forward-mode
   decode graphs (the `forward_mode` field of the decode graph variant). The SGLang CUDA engine
