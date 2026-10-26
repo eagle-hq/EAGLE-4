@@ -82,3 +82,21 @@ def test_refuses_to_overwrite(tmp_path, wheel):
     MODULE.add_notices(source, tmp_path / "out", "1eagle", {"THIRDPARTYNOTICES.txt": notice})
     with pytest.raises(FileExistsError):
         MODULE.add_notices(source, tmp_path / "out", "1eagle", {"THIRDPARTYNOTICES.txt": notice})
+
+
+def test_metadata_without_description_keeps_license_file_in_headers(tmp_path, wheel):
+    source, notice = wheel
+    bare = tmp_path / "bare" / source.name
+    bare.parent.mkdir()
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(bare, "w") as archive:
+        for name in original.namelist():
+            data = original.read(name)
+            if name == f"{INFO}/METADATA":
+                data = b"Metadata-Version: 2.4\nName: sglang-kernel\nVersion: 0.4.7\n"
+            archive.writestr(original.getinfo(name), data)
+    receipt = MODULE.add_notices(bare, tmp_path / "out", "1eagle", {"THIRDPARTYNOTICES.txt": notice})
+    with zipfile.ZipFile(tmp_path / "out" / receipt["output"]) as archive:
+        metadata = archive.read(f"{INFO}/METADATA").decode()
+    assert metadata == (
+        "Metadata-Version: 2.4\nName: sglang-kernel\nVersion: 0.4.7\nLicense-File: THIRDPARTYNOTICES.txt\n"
+    )
