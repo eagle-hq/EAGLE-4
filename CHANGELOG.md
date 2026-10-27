@@ -1,6 +1,7 @@
 # Changelog
 
-## [0.1.3]
+## 0.1.3 (2026-10-27)
+
 
 ### Features
 
@@ -14,6 +15,7 @@
 
 ### Bug fixes
 
+* **tokenspeed:** Calibrate draft heads whose attention layers use a sliding window.
 * **kernels:** Use 64-bit layer offsets when committing GDN records.
 * **core:** Stop `stop_check.py` with a usage error when the workload file has fewer conversations than concurrency times waves, thanks to @kevin9327.
 
