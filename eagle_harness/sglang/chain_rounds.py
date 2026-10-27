@@ -60,6 +60,11 @@ BURST_SHARE = 8
 # the two measured rates: a wrong native choice costs only the speculative gain, a wrong speculative one runs slower
 # than plain decoding.
 NATIVE_MARGIN_SE = 2.0
+# A comparison with native decode whose two rates lie within that margin of each other is measured again, up to this
+# many times, before native decode serves by default. Cold-start rounds (first kernel launches, a busy host) can slow
+# speculation's 32 periods a few-fold without any one of them reaching STALL_FACTOR: one inconclusive pass at batch key 1
+# then made a one-GPU server decode natively at every load, and kept that choice across restarts.
+NATIVE_REMEASURES = 2
 # Speculation that beats native decode's estimate (the batch's one-token verify in the live costs) by this factor,
 # beyond NATIVE_MARGIN_SE standard errors, is not measured against native decode. Requests decoded natively cannot
 # resume drafting and a batch holding one decodes natively, so measuring native decode keeps the batch native until it
@@ -277,6 +282,7 @@ class ServedChainPolicy:
         self._native = native_decode
         self._native_us = native_us
         self._native_checked: set = set()  # batch keys whose speculation was checked against native decode's estimate
+        self._remeasured: Dict[int, int] = defaultdict(int)  # inconclusive native comparisons measured again, per key
         self._writer = writer
         self._sync = sync
         self._path = cache_path
@@ -415,6 +421,13 @@ class ServedChainPolicy:
         margin = NATIVE_MARGIN_SE * math.sqrt(best_var + var)
         return best if best_rate - rate > margin else 0
 
+    @staticmethod
+    def _tied(rates: Dict[int, Tuple[float, float]], width: int) -> bool:
+        """Whether speculation at ``width`` and native decode are within :data:`NATIVE_MARGIN_SE` standard errors
+        of each other (neither clearly ahead)."""
+        (spec, spec_var), (native, native_var) = rates.get(width, (0.0, math.inf)), rates.get(0, (0.0, math.inf))
+        return abs(spec - native) <= NATIVE_MARGIN_SE * math.sqrt(spec_var + native_var)
+
     def _compare(self, key: int, pair: Tuple[int, int]) -> None:
         """Both widths of the pair have their periods: rank 0 decides the next step, every rank applies it."""
         step = None
@@ -430,6 +443,9 @@ class ServedChainPolicy:
                 step = ("compare", best, self._wider(best))
             elif best != 0 and challenger != 0 and self._native and not spec_won_above:
                 step = ("compare", best, 0)
+            elif challenger == 0 and best == 0 and self._remeasured[key] < NATIVE_REMEASURES and self._tied(rates, pair[0]):
+                self._remeasured[key] += 1
+                step = ("compare", pair[0], 0)
             else:
                 step = ("decide", best, None)
             logger.info(

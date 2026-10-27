@@ -50,6 +50,7 @@ from sglang.srt.model_executor.cuda_graph_config import Backend, Phase, check_cu
 from sglang.srt.model_executor.runner import get_batch_sizes_to_capture
 from sglang.srt.runtime_context import get_exec, get_model, get_parallel, get_schedule, get_spec
 from sglang.srt.speculative.draft_utils import DraftBackendFactory
+from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.speculative.eagle_utils import default_tree_mask_mode
 from sglang.srt.speculative.eagle_worker_common import run_eagle_verify
 from sglang.srt.speculative.eagle_worker_v2 import EagleDraftWorker, EAGLEWorkerV2
@@ -77,9 +78,15 @@ from eagle_harness.core.live_costs import CostKey, LiveCosts, config_digest
 from eagle_harness.core.gemm_solutions import load_gemm_solutions
 from eagle_harness.sglang.draft_extend import DraftExtend
 from eagle_harness.sglang.draft_steps import DraftSteps
+from eagle_harness.sglang.draft_kv import StaleDraftKV, kv_only_prefill, kv_only_prefill_supported
 from eagle_harness.sglang.drafter import DynamicDrafter, PrelaunchResult, spin_wait
 from eagle_harness.sglang.l2_warm import MlpL2WarmAhead
-from eagle_harness.sglang.plain_decode import NativeDecode, native_decode_available, native_decode_blocked
+from eagle_harness.sglang.plain_decode import (
+    NativeDecode,
+    native_decode_available,
+    native_decode_blocked,
+    native_decode_tracks_mamba,
+)
 from eagle_harness.sglang.row_attention import DraftRowAttention
 from eagle_harness.sglang.verify_step import (
     AcceptTailGraphs,
@@ -148,8 +155,13 @@ class HarnessDraftWorker(EagleDraftWorker):
     steps: DraftSteps
     extend: DraftExtend
 
-    def __init__(self, server_args, gpu_id, nccl_port, target_worker, *, policy: Policy):
+    def __init__(
+        self, server_args, gpu_id, nccl_port, target_worker, *, policy: Policy, max_verify_bs: Optional[int] = None
+    ):
+        """``max_verify_bs``: the largest batch that speculates (``max_verify_batch_size``); the draft buffers and
+        graphs cover it, larger batches decode natively. None: every running batch."""
         # Read by init_attention_backend, which sglang's __init__ calls.
+        self._max_verify_bs = max_verify_bs
         self._intensity = policy.intensity
         self._verify_budget = policy.max_history_verify_num
         self._delta_slots = policy.launch_depths
@@ -162,7 +174,7 @@ class HarnessDraftWorker(EagleDraftWorker):
         if self.draft_extend_attn_backend is not None:
             self.draft_runner.attn_backend = self.draft_extend_attn_backend
         model = self.draft_runner.model
-        max_bs = get_schedule().max_running_requests
+        max_bs = min(get_schedule().max_running_requests, self._max_verify_bs or get_schedule().max_running_requests)
         width = self.speculative_num_draft_tokens
         shape = TreeShape(top_k=self.topk, max_depth=self.speculative_num_steps)
         device = torch.device(self.device)
@@ -220,6 +232,7 @@ class HarnessDraftWorker(EagleDraftWorker):
         if check_cuda_graph_backend(Phase.DECODE, Backend.DISABLED):
             return
         capture_bs, _ = get_batch_sizes_to_capture(self.draft_runner)
+        capture_bs = [bs for bs in capture_bs if bs <= self.tree.max_bs]
         self.steps.capture(capture_bs)
         self.extend.capture(capture_bs)
 
@@ -243,6 +256,9 @@ class EagleHarnessWorker(EAGLEWorkerV2):
     (:class:`~eagle_harness.core.live_costs.LiveCosts`) and cache them under ``cost_cache``.
     """
 
+    _stale_kv: Optional[StaleDraftKV] = None  # with a verify limit: slots that lack the draft's KV
+    _kv_only_prefill = False
+
     def __init__(self, server_args: "ServerArgs", gpu_id: int, nccl_port: int, target_worker: "TpModelWorker"):
         spec = get_spec()
         self.config: HarnessConfig = parse_harness_config(spec.speculative_algorithm_config)
@@ -259,16 +275,28 @@ class EagleHarnessWorker(EAGLEWorkerV2):
         if served_tree(self.config, spec.speculative_eagle_topk) and native_decode_blocked():
             logger.warning(
                 "EAGLE_HARNESS: this server cannot switch to native decode where speculation loses (Mamba prefix-cache "
-                "tracking or DP attention), so it speculates at every load; --disable-radix-cache enables the switch."
+                "tracking on an engine whose native decode does not track it, or DP attention), so it speculates at every "
+                "load."
             )
         native_decode = self.config.mode is Mode.CALIBRATE or any(
             width == 0 for _, _, width in (self._chain_schedule or ())
         )
-        if native_decode and (get_exec().mamba.enable_mamba_extra_buffer or get_parallel().dp_size != 1):
-            raise ValueError("Native no-spec fallback requires DP1 and disabled Mamba prefix-cache tracking.")
+        if native_decode and (
+            (get_exec().mamba.enable_mamba_extra_buffer and not native_decode_tracks_mamba())
+            or get_parallel().dp_size != 1
+        ):
+            raise ValueError(
+                "Native no-spec fallback requires DP1 and, with Mamba prefix-cache tracking, an engine whose native "
+                "decode tracks it."
+            )
         self._native_decode_enabled = (
             native_decode or self._served_tree or (self._served_chain and native_decode_available())
         )
+        if self.config.max_verify_batch_size is not None and not self._native_decode_enabled:
+            raise ValueError(
+                "EAGLE_HARNESS: max_verify_batch_size needs native decode for the larger batches (a serve-mode tree "
+                "or served chain, DP1, and an engine whose native decode tracks Mamba prefix-cache states)."
+            )
         self.fixed = FixedShapePolicy(self.config.intensity, **shape)
         # Built before sglang's __init__, which creates the draft worker through create_draft_worker.
         self.cost_model: Optional[CostModel] = None
@@ -347,7 +375,12 @@ class EagleHarnessWorker(EAGLEWorkerV2):
     def create_draft_worker(self, server_args, gpu_id, nccl_port, target_worker) -> HarnessDraftWorker:
         """sglang's EAGLE draft worker with the harness's decode-time draft forwards."""
         return HarnessDraftWorker(
-            server_args, gpu_id, nccl_port, target_worker, policy=self.cost_model or self.fixed
+            server_args,
+            gpu_id,
+            nccl_port,
+            target_worker,
+            policy=self.cost_model or self.fixed,
+            max_verify_bs=self.config.max_verify_batch_size,
         )
 
     def init_attention_backends(self) -> None:
@@ -426,7 +459,59 @@ class EagleHarnessWorker(EAGLEWorkerV2):
             self.req_to_token_pool.req_to_token,
             self._chain_rounds,
             enabled=self._native_decode_enabled,
+            track_mamba=get_exec().mamba.enable_mamba_extra_buffer,
+            verify_limit=self.config.max_verify_batch_size,
         )
+        if self.config.max_verify_batch_size is not None and self._native_decode_enabled:
+            alloc = self.token_to_kv_pool_allocator
+            model = self._draft_worker.draft_runner.model
+            self._stale_kv = StaleDraftKV(
+                alloc.size + alloc.page_size, torch.device(self.device), window=getattr(model, "window", None)
+            )
+            qkv = model.model.layers[0].self_attn.qkv_proj if hasattr(model, "write_prefill_kv") else None
+            # The draft-KV-only prompt pass slices the qkv weight: an unquantized draft on an engine with write plans.
+            self._kv_only_prefill = (
+                qkv is not None
+                and qkv.weight.dtype in (torch.bfloat16, torch.float16, torch.float32)
+                and kv_only_prefill_supported()
+            )
+            logger.info("eagle-harness: draft-KV-only prompt pass above the verify limit: %s", self._kv_only_prefill)
+
+    def _prefill(self, batch: "ScheduleBatch", on_publish, grammar_barrier, pp_proxy_tensors):
+        """sglang's prefill (target, then the draft's prompt pass), or for requests that join a running batch above
+        the verify limit (they decode natively for life) the target and only the draft's KV. Both write the draft KV
+        of every prompt position, so a later request that reuses the prompt drafts over valid KV."""
+        stale = self._stale_kv
+        if stale is None or batch.forward_mode != ForwardMode.EXTEND or batch.is_extend_in_batch:
+            return super().forward_batch_generation(batch, on_publish, grammar_barrier, pp_proxy_tensors)
+        stale.drafted(batch.out_cache_loc)
+        if (
+            self._kv_only_prefill
+            and not batch.return_hidden_states
+            and all(req.multimodal_inputs is None for req in batch.reqs)
+            and self._native_decode.skips_draft(batch)
+        ):
+            from sglang.srt.speculative.eagle_utils import get_draft_recurrent_hidden_state_spec
+
+            runner = self._draft_worker.draft_runner
+            with self._draft_context():
+                return kv_only_prefill(
+                    batch,
+                    self.target_worker,
+                    runner,
+                    topk=self.topk,
+                    hidden=get_draft_recurrent_hidden_state_spec(runner),
+                    on_publish=on_publish,
+                    pp_proxy_tensors=pp_proxy_tensors,
+                )
+        rows = batch.req_pool_indices_cpu  # newer engines keep the rows on host; older ones on each request
+        stale.reused(
+            self.req_to_token_pool.req_to_token,
+            rows.tolist() if rows is not None else [req.req_pool_idx for req in batch.reqs],
+            batch.prefix_lens,
+            [prefix + extend for prefix, extend in zip(batch.prefix_lens, batch.extend_lens)],
+        )
+        return super().forward_batch_generation(batch, on_publish, grammar_barrier, pp_proxy_tensors)
 
     def _save_live_costs(self) -> None:
         try:
@@ -446,11 +531,13 @@ class EagleHarnessWorker(EAGLEWorkerV2):
             if sampled is not None:
                 # Prefilled requests start from sglang's deterministic top-k roots: no recorded proposal distribution.
                 sampled.invalidate(batch.req_pool_indices)
-            return super().forward_batch_generation(batch, on_publish, grammar_barrier, pp_proxy_tensors)
+            return self._prefill(batch, on_publish, grammar_barrier, pp_proxy_tensors)
         native_decode = self._native_decode.select(batch)
         if native_decode:
             self._drafter.cancel_prelaunch()
             result = self._native_decode.run(batch, grammar_barrier)
+            if self._stale_kv is not None:
+                self._stale_kv.target_only(batch.out_cache_loc)
             self._verified.record()
         else:
             sampled = _sampled_tree(self)
@@ -485,6 +572,8 @@ class EagleHarnessWorker(EAGLEWorkerV2):
             with spec_stage_span("verify"):
                 started = None if timer is None else timer.start()
                 result, staged = self._verify(batch, width, grammar_barrier)
+                if self._stale_kv is not None and not batch.forward_mode.is_idle():
+                    self._stale_kv.drafted(batch.out_cache_loc)  # the round's slots; the draft extend writes them
                 self._verified.record()
                 if started is not None:
                     timer.stop(started, self._drafter.bucket(len(batch.reqs)), width, self._drafter.average_context(batch))

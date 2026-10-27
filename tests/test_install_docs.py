@@ -66,6 +66,8 @@ def test_copy_paste_commands_use_the_release_pins(guide):
     }
     indexes = {s[k] for k in ("EAGLE_CUDA_INDEX", "EAGLE_TORCH_CUDA_INDEX", "EAGLE_NVIDIA_INDEX")}
     images = {s[k] for k in ("EAGLE_SGLANG_IMAGE", "EAGLE_VLLM_IMAGE", "EAGLE_TOKENSPEED_IMAGE")}
+    for image in re.findall(r"ghcr\.io/eagle-hq/[\w.-]+:\d+\.\d+\.\d+", guide.read_text()):
+        assert image in images, f"{guide.name}: {image} does not match release.env"
     for block in bash_blocks(guide):
         for package, version in re.findall(r'"(sglang|vllm|tokenspeed(?:-\w+)?)==([^"\s]+)"', block):
             assert version == pins[package], f"{guide.name}: {package}=={version}, release.env pins {pins[package]}"
@@ -96,6 +98,20 @@ def test_copy_paste_commands_never_pin_the_harness():
     for guide in QUICKSTARTS:
         for block in bash_blocks(guide):
             assert not re.search(r"eagle-harness(\[\w+\])?==\d", block), f"{guide.name}: {block}"
+
+
+def test_tokenspeed_install_names_only_the_new_release_source_and_builds():
+    install = (REPO / "docs/install.md").read_text()
+    links = re.findall(r"https://github\.com/eagle-hq/tokenspeed[^)\s]*", install)
+    assert links == ["https://github.com/eagle-hq/tokenspeed/tree/eagle/v0.1.3"]
+    pins = re.findall(r'"(tokenspeed(?:-\w+)?)==([^"\s]+)"', section(REPO / "docs/install.md", "## TokenSpeed CUDA"))
+    assert dict(pins) == {"tokenspeed": "0.1.1+eagle.8", "tokenspeed-kernel": "0.1.4+eagle.8",
+                          "tokenspeed-scheduler": "0.1.42+eagle.8", "tokenspeed-engine": "0.1.0+eagle.8"}
+
+
+def test_docs_do_not_reintroduce_withdrawn_tokenspeed_pins():
+    for path in [REPO / "CHANGELOG.md", *GUIDES, *sorted((REPO / "docs/release-notes").glob("*.md"))]:
+        assert not re.search(r"tokenspeed[^\n]*\+eagle\.(?:5|7)\b", path.read_text(), re.I), path
 
 
 def test_rocm_install_uses_public_indexes_and_the_shipped_lock():

@@ -41,8 +41,7 @@ def golden_tables(golden, tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def engine_policy():
-    pytest.importorskip("tokenspeed")
-    from tokenspeed.runtime.execution.drafter.tree_round import device_policy
+    from eagle_harness.tokenspeed.tree_round import device_policy
 
     return device_policy
 
@@ -107,7 +106,7 @@ def test_golden_nonlagged_scores_round_trip(golden, golden_tables, flat):
 
 @pytest.mark.parametrize("case_index", range(3), ids=["serving-k4", "serving-k6", "serving-k8"])
 def test_engine_packs_golden_costs_exactly(golden, golden_tables, engine_policy, case_index):
-    from tokenspeed.runtime.execution.drafter.tree_round.policy_cost import build_tables
+    from eagle_harness.tokenspeed.tree_round.policy_cost import build_tables
 
     case = golden["decisions_high_intensity"][case_index]
     costs = tree_policy_costs(_model(golden_tables, case))

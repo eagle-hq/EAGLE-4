@@ -82,7 +82,9 @@ def modules(monkeypatch):
     stub("sglang.srt.model_executor.cuda_graph_config", Backend=object, Phase=object, check_cuda_graph_backend=object)
     stub("sglang.srt.model_executor.runner", get_batch_sizes_to_capture=lambda runner: ([1, 8], None))
     stub(
-        "sglang.srt.runtime_context", **dict.fromkeys(("get_exec", "get_model", "get_parallel", "get_schedule", "get_spec"), object)
+        "sglang.srt.runtime_context",
+        **dict.fromkeys(("get_model", "get_parallel", "get_schedule", "get_spec"), object),
+        get_exec=lambda: SimpleNamespace(mamba=SimpleNamespace(enable_mamba_extra_buffer=False)),
     )
     stub("sglang.srt.speculative.draft_utils", DraftBackendFactory=object)
     stub("sglang.srt.speculative.eagle_utils", default_tree_mask_mode=object)
@@ -405,6 +407,7 @@ def test_attention_initialization_wires_the_same_width_plan_into_both_routes(mod
         intensity=module.ComputeIntensity.CHAIN,
         data_path=None if kind == "served" else str(tmp_path),
         cost_cache_dir=str(tmp_path),
+        max_verify_batch_size=None,
     )
     worker._chain_schedule = [(1, 1, 4), (2, 8, 0)] if kind == "schedule" else None
     worker._served_chain = kind == "served"
@@ -455,7 +458,7 @@ def test_packaged_choices_look_up_this_servers_setup(modules, monkeypatch):
 
 
 @pytest.mark.parametrize("dp_size,tracking", [(2, False), (1, True), (2, True)])
-def test_native_decode_still_rejects_dp_and_mamba_tracking(modules, monkeypatch, dp_size, tracking):
+def test_native_decode_still_rejects_dp_and_untracked_mamba_states(modules, monkeypatch, dp_size, tracking):
     module = modules.worker
     spec = SimpleNamespace(
         speculative_algorithm_config="{}",
@@ -471,6 +474,7 @@ def test_native_decode_still_rejects_dp_and_mamba_tracking(modules, monkeypatch,
         module, "get_exec", lambda: SimpleNamespace(mamba=SimpleNamespace(enable_mamba_extra_buffer=tracking))
     )
     monkeypatch.setattr(module, "get_parallel", lambda: SimpleNamespace(dp_size=dp_size))
+    monkeypatch.setattr(module, "native_decode_tracks_mamba", lambda: False)
     target = SimpleNamespace(model_runner=SimpleNamespace(model_config=object()))
-    with pytest.raises(ValueError, match="requires DP1 and disabled Mamba prefix-cache tracking"):
+    with pytest.raises(ValueError, match="requires DP1 and, with Mamba prefix-cache tracking, an engine whose native"):
         module.EagleHarnessWorker(None, 0, 0, target)

@@ -22,6 +22,7 @@ For legacy environment variables and CLI flags, see [Migration](migration.md).
 | `cost_model` | object | see below | Cost model constants. |
 | `draft_model` | object | see below | EAGLE-4 draft model options. |
 | `l2_warm` | object | see below | L2 prefetches of target weights inside the sglang verify graphs. |
+| `max_verify_batch_size` | integer | none | SGLang: the largest batch that speculates; larger batches decode natively, and a hybrid target keeps per-step verify states for that many requests only. Without `--max-running-requests`, the default is 32 for a tree and 48 for a chain, and the engine admits as many requests as its memory allows (as without speculation), up to the tree or chain batch limit. None with `--max-running-requests`: every running batch may speculate. |
 
 ## `cost_model`
 
@@ -102,7 +103,9 @@ whole target off FlashInfer. Keep the target backend unchanged for a matched spe
 TokenSpeed takes the draft shape from its server arguments. `"mode": "serve"` is the default, as on
 the other engines: it uses calibrated GPU-side decisions to stop drafting and select meaningful verify nodes, and needs
 `data_path` unless a complete `chain_width_table` (from batch size 1) sets every width. Without a usable config the
-server refuses to start. `"mode": "static"` uses every configured draft step and needs no cost data.
+server refuses to start. `"mode": "static"` uses every configured draft step and needs no cost data. With the
+released EAGLE-4 draft, whose attention layer uses a sliding window, the TokenSpeed 0.1.3 engine stops static mode
+at server start ([known limits](known-limits.md#tokenspeed)), so serve with `"mode": "serve"`.
 Tree modes keep one physical verify width per server. Serve-mode trees pad unused nodes with unconnected roots.
 Pass `--sampling-backend greedy` because the default FlashInfer sampler cannot verify draft trees.
 
@@ -110,7 +113,9 @@ For calibrated tree serving, provide `data_path` containing the calibration `cos
 The [TokenSpeed quickstart](quickstart-tokenspeed.md) distinguishes the single-client cap of 4 from the
 concurrent cap of 32. Neither is a general performance recommendation.
 The calibration must match the target, draft, hardware, tensor-parallel setup and recurrent-state dtype.
-`calibrate` and live costs are not supported by this adapter. Chains use top-k 1 and `chain_intensity`.
+Use the [TokenSpeed calibration driver](quickstart-tokenspeed.md#calibrate-costs) to measure every batch size
+up to the server's request limit. Live cost updates during serving are not supported.
+Chains use top-k 1 and `chain_intensity`.
 An explicit `chain_width_table` contains increasing `[minimum_batch_size, verify_width]` pairs in `serve` mode.
 A complete schedule starting at batch size 1 does not need cost files. This describes the configuration interface,
 not a measured high-concurrency speed claim. Sampled-tree distribution quality is unqualified.

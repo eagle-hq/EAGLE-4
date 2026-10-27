@@ -48,6 +48,7 @@ include = ["eagle_harness*"]
 [tool.setuptools.package-data]
 "eagle_harness.core" = ["*.csv", "profiles/**/*.json", "profiles/**/*.csv", "profiles/**/*.md"]
 "eagle_harness.kernels" = ["csrc/*.cu", "_native/*/*.so"]
+"eagle_harness.tokenspeed.tree_round.ops" = ["csrc/*.cu", "csrc/*.h"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

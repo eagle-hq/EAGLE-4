@@ -60,8 +60,12 @@ class VerifyWidthGraphs(DecodeGraphVariants):
         greedy: bool = True,
         *,
         plain_decode: bool = False,
+        max_verify_bs: Optional[int] = None,
     ):
+        """``max_verify_bs``: the largest batch that verifies (``max_verify_batch_size``); larger batches capture the
+        native decode graph only."""
         self.intensity = intensity
+        self.max_verify_bs = max_verify_bs
         self.max_width = max_width
         self.tail_mask = tail_mask
         self.greedy = greedy
@@ -80,6 +84,8 @@ class VerifyWidthGraphs(DecodeGraphVariants):
 
     def capture_variants(self, bs: int) -> Sequence[DecodeGraphVariant]:
         """The verify-width graphs to capture for a batch size (the argmax graphs last)."""
+        if self.max_verify_bs is not None and bs > self.max_verify_bs:
+            return [self._plain] if self._plain is not None else []
         widths = verify_widths(bs, self.intensity, self.max_width)
         variants = [self._variant(w) for w in widths]
         if self.greedy and bs == 1:

@@ -64,6 +64,12 @@ tables without a key (measured before keys existed) with a warning.
 
 ## Offline calibration
 
+TokenSpeed has a dedicated offline driver, `python -m eagle_harness.tokenspeed.measure_run`. It uses generic
+engine hooks to measure draft and target stages and writes the same shared cost-profile format that serve mode
+reads. It measures every batch size through `--max-bs`, rather than borrowing another engine's costs. See the
+[TokenSpeed calibration recipe](quickstart-tokenspeed.md#calibrate-costs) for matching TP, draft shape and state dtype.
+The `eagle-harness calibrate` frontend below selects SGLang or vLLM, not TokenSpeed.
+
 Use `eagle-harness calibrate` to measure costs on the GPUs and engine you will serve with. It starts and stops
 its own engine processes, retains raw measurements and prints a matching serving command. Stop other servers
 on your allocated GPUs first.

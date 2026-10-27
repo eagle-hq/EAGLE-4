@@ -120,11 +120,15 @@ class HarnessConfig:
     cost_model: CostModelConfig = field(default_factory=CostModelConfig)
     draft_model: DraftModelOptions = field(default_factory=DraftModelOptions)
     l2_warm: L2Warm = field(default_factory=L2Warm)
+    # The largest batch that speculates; larger batches decode natively. None: every running batch may speculate.
+    max_verify_batch_size: Optional[int] = None
 
     def validate(self) -> "HarnessConfig":
         """Check the config; return it."""
         if self.mode is Mode.CALIBRATE and not self.data_path:
             raise ValueError("calibrate mode needs data_path for its output")
+        if self.max_verify_batch_size is not None and self.max_verify_batch_size < 1:
+            raise ValueError("max_verify_batch_size must be at least 1")
         return self
 
     @property

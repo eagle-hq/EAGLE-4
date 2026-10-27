@@ -22,7 +22,7 @@ import logging
 import os
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 
@@ -453,6 +453,28 @@ class AttentionShape:
     attention_layers: int
     sliding_window_layers: int = 0
     sliding_window: int = 0
+
+
+def attention_shape(config: Any) -> AttentionShape:
+    """Read attention counts from a text config, refusing unknown layer layouts."""
+    config = getattr(config, "text_config", config)
+    layers = getattr(config, "num_hidden_layers", 0)
+    types = getattr(config, "layer_types", None)
+    window = getattr(config, "sliding_window", None) or 0
+    if types is None:
+        if getattr(config, "full_attention_interval", None) or getattr(config, "hybrid_override_pattern", None):
+            raise ValueError("hybrid calibration needs explicit layer_types in the model config")
+        types = [
+            "sliding_attention" if window and getattr(config, "use_sliding_window", True) else "full_attention"
+        ] * layers
+    known = {"full_attention", "sliding_attention", "linear_attention", "mamba"}
+    if len(types) != layers or set(types) - known:
+        raise ValueError(f"cannot infer attention layout for calibration: {types!r}")
+    count = sum(kind in {"full_attention", "sliding_attention"} for kind in types)
+    sliding = types.count("sliding_attention")
+    if count < 1 or (sliding and window <= 0):
+        raise ValueError("calibration needs attention layers and a positive window for sliding attention")
+    return AttentionShape(count, sliding, window)
 
 
 def save_model_timings(paths: CalibrationPaths, params: MeasureParams, records: Sequence[MeasureRecord]) -> None:

@@ -20,6 +20,24 @@ Choose an engine with measured coverage for your model pair and request features
 [support matrix](support-matrix.md). SGLang picks the verify width per round. vLLM fixes that width per batch size,
 so only the draft depth adapts per round.
 
+## How do I benchmark EAGLE-4?
+
+- Warm the server up first. The first requests after a start compile kernels and seed the live costs. On
+  4× B300 at one request (SGLang, eagle-harness 0.1.2, started with `--skip-server-warmup`), the first request
+  after a start decoded at 63 to 85 tokens/s in three starts. The same request after warm-up decoded at 910 to
+  915 tokens/s. Send a few requests that look like your workload, or run the workload once, before timing.
+  Restarts reuse the caches under `~/.cache/eagle-harness/costs`.
+- Compare against the same engine and flags. Start the server without speculation from the same command minus
+  the `--speculative-*` flags. Keep `--mamba-ssm-dtype`, the attention backend, the page size and the CUDA graph
+  settings identical, because they change the speed of plain decoding too.
+- Report decoding and prefill separately. Speculative decoding speeds up decoding, not prefill. With long
+  prompts and short replies, as in agentic workloads, time to first token is a large share of each request, so
+  end-to-end speedups are lower than decoding speedups for every speculative method. Report decoding throughput
+  (first to last output token) and time to first token.
+- Measure at the temperature you serve. At temperature 1, SGLang verifies a sampled draft tree. Other
+  temperatures use a greedy draft verified by the target's sampler
+  ([known limits](known-limits.md#performance-and-correctness-in-progress)).
+
 ## Do I need cost tables?
 
 When no `data_path` is supplied, SGLang selects a matching packaged MI355X profile if available, otherwise

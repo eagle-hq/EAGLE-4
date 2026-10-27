@@ -16,7 +16,14 @@ from typing import Any
 
 import torch
 
-from eagle_harness.core.calibration import AttentionShape, CalibrationPaths, MeasureParams, StepTiming, fit_step_timings
+from eagle_harness.core.calibration import (
+    AttentionShape,
+    CalibrationPaths,
+    MeasureParams,
+    StepTiming,
+    attention_shape,
+    fit_step_timings,
+)
 from eagle_harness.core.limits import MAX_CHAIN_VERIFY_NUM, ComputeIntensity
 from eagle_harness.core.live_costs import CostKey, config_digest, write_key
 
@@ -373,28 +380,6 @@ def cost_key(model: str, draft: str, tp: int, dtype: Any) -> CostKey:
         engine=f"vllm {vllm.__version__}",
         dtype=str(dtype),
     )
-
-
-def attention_shape(config: Any) -> AttentionShape:
-    """Read attention counts from a text config, refusing unknown layer layouts."""
-    config = getattr(config, "text_config", config)
-    layers = getattr(config, "num_hidden_layers", 0)
-    types = getattr(config, "layer_types", None)
-    window = getattr(config, "sliding_window", None) or 0
-    if types is None:
-        if getattr(config, "full_attention_interval", None) or getattr(config, "hybrid_override_pattern", None):
-            raise ValueError("hybrid calibration needs explicit layer_types in the model config")
-        types = [
-            "sliding_attention" if window and getattr(config, "use_sliding_window", True) else "full_attention"
-        ] * layers
-    known = {"full_attention", "sliding_attention", "linear_attention", "mamba"}
-    if len(types) != layers or set(types) - known:
-        raise ValueError(f"cannot infer attention layout for calibration: {types!r}")
-    count = sum(kind in {"full_attention", "sliding_attention"} for kind in types)
-    sliding = types.count("sliding_attention")
-    if count < 1 or (sliding and window <= 0):
-        raise ValueError("calibration needs attention layers and a positive window for sliding attention")
-    return AttentionShape(count, sliding, window)
 
 
 def validate_tables(data_path: str, *, context_stop: int | None = None) -> None:

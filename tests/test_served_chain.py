@@ -278,6 +278,23 @@ def test_speculation_beats_native_decode_only_beyond_the_noise_of_the_two_rates(
     assert _decide_width_4_or_native(clock, lambda i: 10) == 4
 
 
+def test_a_tied_comparison_with_native_decode_is_measured_again(clock):
+    """Width 4 commits 1.5 tokens per request and round. Its first 32 periods are slow and uneven (4 and 24 ms, as on a
+    cold start: no single period is a stall), which ties it with native decode's 10 ms. The comparison runs again,
+    and the clean periods that follow (10 ms) decide for speculation; a tie that persists still falls to native decode
+    (test above). Before, the first tie decided native decode for good."""
+    policy = _policy(native=True)
+    policy._pair[64] = (4, 0)
+    policy.profile = lambda: chain_rounds.AcceptProfile((0.5, 0.0, 0.0))
+    requests = _reqs(*range(64))
+    i = 0
+    while policy.exploring(64):
+        policy.round_start(64, policy.width(64), requests)
+        clock.advance((4 if i % 2 else 24) if i < 33 else 10)
+        i += 1
+    assert policy.decided[64] == 4 and policy._remeasured[64] == 1
+
+
 def _tree(tmp_path=None, key=None, writer=True, sync=lambda step: step, native_us=None):
     return ServedTreePolicy(
         16,

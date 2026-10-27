@@ -106,15 +106,19 @@ eagle-harness supplies the tree policy and the draft model:
   (`tests/test_tokenspeed_adapter.py`). `eagle_harness/tokenspeed/tree_lanes.py` turns the frontier choices into
   TokenSpeed's 64-bit lane masks (each lane sees its ancestors' draft slots) and the verify window and parents.
 
-The EAGLE-4 draft layer has a sliding window. The pinned TokenSpeed release build supports sliding-window
-attention in tree lanes (every lane of a request sits at one position, so all lanes see the same committed keys).
+The EAGLE-4 draft layer has a sliding window. Serve mode runs its draft rounds in `eagle_harness/tokenspeed/tree_round`
+and serves this draft. The TokenSpeed 0.1.3 engine's own draft-tree lanes, which static mode uses, have no
+sliding-window path yet, so static mode stops at server start with that draft
+([known limits](known-limits.md#tokenspeed)).
 
 Serve mode captures the target, sampling and draft extend together. The host launches the first draft-depth graph.
 The GPU cost policy decides whether to continue and tail-launches later depths and finalization. Calibration parsing,
 cost adjustments and depth thresholds come from the shared core cost model. `CostModel.tree_policy_costs()` exports
-immutable host cost records once at binding. The installed TokenSpeed engine packs these records and owns the
-device policy, draft-round graphs, tree kernels and tail-launch runtime; those implementations are not vendored in
-eagle-harness. Its GPU policy consumes the shared thresholds without a second host cost model.
+immutable host cost records once at binding. `eagle_harness/tokenspeed/tree_round` packs these records and owns the
+device policy, draft-round graphs, tree kernels and tail-launch runtime. Its GPU policy consumes the shared thresholds
+without a second host cost model. The package ships its CUDA sources and builds them with the harness compiler and
+cache helpers. TokenSpeed supplies generic plugin registration, round lifecycle, tree attention, scheduler headroom
+and recorded-proposal verification hooks.
 
 For trees, the physical verify width stays fixed at `--speculative-num-draft-tokens`. A round can select fewer meaningful nodes
 and pad the rest with unconnected roots. Draft lane slots `(steps - 1) * K` have their own KV reservation and must fit

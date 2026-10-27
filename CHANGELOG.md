@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.1.3]
+
+### Features
+
+* **pkg:** Support TokenSpeed through generic engine hooks, with EAGLE-4 policy and tree verification in the harness plugin. TokenSpeed serves EAGLE-4 in serve mode from calibrated cost tables. Static mode with the released EAGLE-4 draft is a known limit until 0.1.4.
+* **pkg:** Check sampled output distributions through the TokenSpeed API.
+
+### Performance
+
+* **sglang:** Serve the quick-start command with independent request admission and native decoding at high load.
+* **sglang:** Fill draft KV without prediction work for prompts admitted above the verify limit.
+
+### Bug fixes
+
+* **kernels:** Use 64-bit layer offsets when committing GDN records.
+* **core:** Stop `stop_check.py` with a usage error when the workload file has fewer conversations than concurrency times waves, thanks to @kevin9327.
+
+### Builds and installation
+
+* **pkg:** Build engine wheels and release images from approved inputs.
+* **pkg:** Explain server warm-up before throughput measurement.
+* **pkg:** Document the TokenSpeed 128K-token configuration measured on 0.1.2.
+* **pkg:** Document the TokenSpeed TVM helper's provenance.
+* **pkg:** Install CUDA redistributables with `cuda_redist.py` on Python 3.10, thanks to @kevin9327.
+* **pkg:** Keep added `License-File` headers in the metadata of wheels without a description, thanks to @kevin9327.
+* **pkg:** Write the wheel index root page for an index with no artifacts yet, thanks to @kevin9327.
+* **docs:** Fix grammar in the FAQ and known limits, thanks to @lunar-me.
+
 ## 0.1.2 (2026-10-23)
 
 
@@ -27,7 +55,7 @@
 
 * **sglang:** serve with only the draft path by default, on SGLang's default overlap scheduler
 * **sglang:** install the SGLang CUDA engine `0.5.23.dev252+eagle.5`
-* **tokenspeed:** install the TokenSpeed engine `0.1.1+eagle.5` (experimental)
+* **tokenspeed:** install the TokenSpeed engine build measured for 0.1.1 (since withdrawn; use the current install guide)
 * **tokenspeed:** negotiate the plugin contract by capabilities
 * **vllm:** answer vLLM's suspend_drafting and verify_budget hooks
 * **core:** fp32 arbiter for greedy-parity divergences above the near-tie gap; a candidate that is the fp32 argmax passes

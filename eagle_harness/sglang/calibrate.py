@@ -24,7 +24,8 @@ that ``data_path`` reads them. ``report`` prints the round times per batch size 
 the widths per batch size that server will use (:func:`eagle_harness.core.chain_width.chain_widths`).
 
 After native decode begins, requests stay OFF until completion because their draft KV is stale. A prefill resets
-the calibration sequence for fresh requests. The runtime requires DP1 and disabled Mamba prefix-cache tracking.
+the calibration sequence for fresh requests. The runtime requires DP1 and, with Mamba prefix-cache tracking, an
+engine whose native decode tracks it.
 
 These are served-path timings on purpose: the period of a served round holds the scheduler, the draft extend and the
 launches, which isolated forward timings miss.

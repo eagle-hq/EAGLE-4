@@ -147,12 +147,18 @@ def test_plugin_registers_the_draft_model(registered):
 # ------------------------------------------------------- H11 + server args
 @pytest.mark.parametrize("overlap_off", [False, True])
 def test_server_args_accept_eagle_harness_and_config(registered, overlap_off):
+    from eagle_harness.sglang.plain_decode import verify_limit_supported
+
     args = _server_args(disable_overlap_schedule=overlap_off)
     handle_speculative_decoding(args)
     assert resolution_result(args, "speculative_algorithm") == ALGORITHM_NAME
     assert resolution_result(args, "disable_overlap_schedule") is overlap_off
     assert resolution_result(args, "scheduler_recv_interval") == 4
-    assert resolution_result(args, "max_running_requests") == 32
+    # Native decoding separates admission from the memory-conservative verify limit.
+    native_route = verify_limit_supported()
+    assert resolution_result(args, "max_running_requests") == (512 if native_route else 32)
+    config = parse_harness_config(resolution_result(args, "speculative_algorithm_config"))
+    assert config.max_verify_batch_size == (32 if native_route else None)
     assert resolution_result(args, "enable_mixed_chunk") is False
 
 

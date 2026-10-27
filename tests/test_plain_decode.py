@@ -98,7 +98,7 @@ def test_worker_off_dispatch_skips_draft_verify_and_prelaunch(monkeypatch):
     )
     batch = SimpleNamespace(forward_mode=ForwardMode.DECODE, is_extend_in_batch=False, reqs=[Request()])
     result = SimpleNamespace(new_seq_lens=[5], new_seq_lens_cpu=[5])
-    monkeypatch.setattr(plain_module, "plain_decode", lambda *args: calls.append("decode") or result)
+    monkeypatch.setattr(plain_module, "plain_decode", lambda *args, **kwargs: calls.append("decode") or result)
     worker._native_decode._requests.publishes_host_lengths = True
     on_publish = lambda lengths, **host: calls.append(("publish", lengths, host))  # noqa: E731
     assert worker.forward_batch_generation(batch, on_publish=on_publish) is result
@@ -286,3 +286,320 @@ def test_plain_decode_restores_spec_state_when_target_raises():
         plain_decode(batch, SimpleNamespace(forward_batch_generation=forward), torch.arange(4).reshape(1, 4))
     assert batch.spec_info is draft and batch.spec_algorithm is algorithm
     assert draft.bonus_tokens.tolist() == [17]
+
+
+@pytest.mark.parametrize("tracking", [False, True])
+def test_plain_decode_saves_mamba_states_on_the_track_grid_like_a_no_spec_decode(monkeypatch, tracking):
+    pytest.importorskip("sglang")
+    import torch
+    from sglang.srt import runtime_context
+    from sglang.srt.speculative import spec_utils
+
+    from eagle_harness.sglang.plain_decode import plain_decode
+
+    monkeypatch.setattr(runtime_context, "mamba_track_grid", lambda page_size: 8, raising=False)
+    planned = []
+
+    def prepare(batch):  # the engine's verify-time track plan: slots only, no mask
+        planned.append(batch.seq_lens.tolist())
+        batch.mamba_track_indices = torch.tensor([40, 41])
+        batch.mamba_track_mask = None
+
+    monkeypatch.setattr(spec_utils, "prepare_mamba_track_for_verify", prepare, raising=False)
+    draft = SimpleNamespace(bonus_tokens=torch.tensor([17, 19], dtype=torch.int32))
+    batch = SimpleNamespace(
+        spec_info=draft,
+        spec_algorithm=object(),
+        req_pool_indices=torch.tensor([0, 1]),
+        seq_lens=torch.tensor([5, 7]),
+        seq_lens_cpu=torch.tensor([5, 7]),
+        return_logprob=False,
+        tree_cache=SimpleNamespace(page_size=1),
+        mamba_track_indices=None,
+        mamba_track_mask=None,
+    )
+    seen = {}
+
+    def forward(actual, **kwargs):
+        seen["indices"], seen["mask"] = actual.mamba_track_indices, actual.mamba_track_mask
+        return SimpleNamespace(next_token_ids=torch.tensor([23, 29]))
+
+    target = SimpleNamespace(forward_batch_generation=forward)
+    plain_decode(batch, target, torch.arange(20).reshape(2, 10), track_mamba=tracking)
+    if tracking:
+        # The new lengths are 6 and 8: only the second row lands on the grid of 8, after its token is in the state.
+        assert planned == [[6, 8]]
+        assert seen["indices"].tolist() == [40, 41]
+        assert seen["mask"].tolist() == [False, True]
+    else:
+        assert planned == [] and seen == {"indices": None, "mask": None}
+
+
+@pytest.mark.parametrize("engine_tracks", [False, True])
+def test_native_decode_needs_tracking_graphs_only_with_the_radix_cache(monkeypatch, engine_tracks):
+    pytest.importorskip("sglang")
+    from sglang.srt import runtime_context
+
+    from eagle_harness.sglang import plain_decode as plain_module
+    from eagle_harness.sglang import verify_graphs
+
+    monkeypatch.setattr(verify_graphs, "native_decode_graphs", lambda: True)
+    monkeypatch.setattr(plain_module, "native_decode_tracks_mamba", lambda: engine_tracks)
+    monkeypatch.setattr(runtime_context, "get_parallel", lambda: SimpleNamespace(dp_size=1))
+    for tracking in (False, True):
+        monkeypatch.setattr(
+            runtime_context,
+            "get_exec",
+            lambda tracking=tracking: SimpleNamespace(mamba=SimpleNamespace(enable_mamba_extra_buffer=tracking)),
+        )
+        available = engine_tracks or not tracking
+        assert plain_module.native_decode_available() is available
+        assert plain_module.native_decode_blocked() is not available
+
+
+@pytest.mark.parametrize("native_route", [False, True])
+@pytest.mark.parametrize("intensity,default", [("high_intensity", 32), ("chain_intensity", 48)])
+def test_without_a_running_cap_admission_follows_memory_where_large_batches_decode_natively(
+    native_route, intensity, default
+):
+    pytest.importorskip("sglang")
+    from eagle_harness.core.config import harness_config_from_dict
+    from eagle_harness.core.limits import max_batch_size
+    from eagle_harness.sglang.algorithm import default_batch_limits
+
+    config = harness_config_from_dict({"intensity": intensity})
+    running, verify = default_batch_limits(config, native_route)
+    if native_route:
+        # The verify states cover the old default only; the engine sizes admission as without speculation.
+        assert (running, verify) == (max_batch_size(config.intensity), default)
+    else:
+        assert (running, verify) == (default, None)
+    explicit = harness_config_from_dict({"intensity": intensity, "max_verify_batch_size": 8})
+    assert default_batch_limits(explicit, native_route) == (
+        (max_batch_size(config.intensity), 8) if native_route else (8, 8)
+    )
+
+
+def test_batches_above_the_verify_limit_decode_natively_without_asking_the_policy():
+    pytest.importorskip("sglang")
+    from eagle_harness.sglang.plain_decode import NativeDecode
+
+    asked = []
+    rounds = SimpleNamespace(plain_width=lambda bs: asked.append(bs) or 4)
+    native = NativeDecode(None, None, rounds, enabled=True, verify_limit=2)
+
+    class Request:
+        pass
+
+    def batch(n):
+        return SimpleNamespace(forward_mode=SimpleNamespace(is_idle=lambda: False), reqs=[Request() for _ in range(n)])
+
+    assert not native.select(batch(2)) and asked == [2]
+    assert native.select(batch(3)) and asked == [2]
+
+
+def test_batches_above_the_verify_limit_capture_only_the_native_decode_graph():
+    pytest.importorskip("sglang")
+    from sglang.srt.model_executor.forward_batch_info import ForwardMode
+    from sglang.srt.model_executor.runner.decode_graph_variants import DecodeGraphVariant
+
+    from eagle_harness.core.limits import ComputeIntensity
+    from eagle_harness.sglang.verify_graphs import VerifyWidthGraphs
+
+    if not hasattr(DecodeGraphVariant, "forward_mode"):
+        pytest.skip("host has no per-variant forward mode")
+    graphs = VerifyWidthGraphs(ComputeIntensity.CHAIN, 8, None, plain_decode=True, max_verify_bs=8)
+    assert len(graphs.capture_variants(8)) > 1
+    (native,) = graphs.capture_variants(16)
+    assert native.forward_mode is ForwardMode.DECODE
+
+
+def test_prefills_joining_a_batch_above_the_verify_limit_skip_the_draft_for_life():
+    pytest.importorskip("sglang")
+    from eagle_harness.sglang.plain_decode import NativeDecode
+
+    native = NativeDecode(None, None, SimpleNamespace(plain_width=lambda bs: 4), enabled=True, verify_limit=2)
+
+    class Request:
+        done = False
+
+        def finished(self):
+            return self.done
+
+    def batch(reqs):
+        return SimpleNamespace(forward_mode=SimpleNamespace(is_idle=lambda: False), reqs=reqs)
+
+    a, b, c, d, e, f = Request(), Request(), Request(), Request(), Request(), Request()
+    assert not native.skips_draft(batch([a])) and not native.skips_draft(batch([b]))  # running 1, 2
+    assert native.skips_draft(batch([c]))  # running 3 > 2: c is off before its first decode
+    assert native.select(batch([a, b, c]))
+    assert native.select(batch([a]))  # a decoded natively above the limit: off for life
+    assert not native.skips_draft(batch([d]))  # running 1 + d = 2: drafts again
+    assert not native.skips_draft(batch([d]))  # d's next chunk is not counted twice
+    assert native.skips_draft(batch([c]))  # a chunk of a request that is off skips at any load
+    assert not native.select(batch([d]))
+    assert native.select(batch([a, b, c]))  # a burst's last decode step: every row finishes in it
+    a.done = b.done = c.done = True
+    assert not native.skips_draft(batch([e]))  # the batch e joins is empty: e drafts
+    assert not native.skips_draft(batch([f]))  # e + f = 2
+
+
+def test_stale_draft_kv_counts_reused_slots_the_draft_window_reads():
+    import torch
+
+    from eagle_harness.sglang.draft_kv import StaleDraftKV
+
+    req_to_token = torch.arange(1, 17).view(2, 8)  # row 0: slots 1-8, row 1: slots 9-16
+    kv = StaleDraftKV(20, "cpu")
+    kv.target_only(torch.tensor([3, 4, 12]))
+    kv.drafted(torch.tensor([4]))  # a later drafted write of slot 4
+    kv.reused(req_to_token, rows=[0, 1], prefix_lens=[4, 0], seq_lens=[6, 3])  # row 0 reads slots 1-4
+    assert kv._reused.tolist() == [1, 1]
+    windowed = StaleDraftKV(20, "cpu", window=3)
+    windowed.target_only(torch.tensor([3]))
+    windowed.reused(req_to_token, rows=[0], prefix_lens=[4], seq_lens=[6])  # first drafted key: position 3 (slot 4)
+    assert windowed._reused.tolist() == [0, 0]
+
+
+def test_stale_draft_kv_never_waits_for_the_gpu():
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("needs a GPU")
+    from eagle_harness.sglang.draft_kv import StaleDraftKV
+
+    kv = StaleDraftKV(1 << 16, "cuda")
+    req_to_token = torch.arange(1, 1 + 4 * 512, device="cuda").view(4, 512)
+    slots = torch.arange(100, 213, device="cuda")
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        kv.target_only(slots)
+        kv.drafted(slots[:8])
+        kv.reused(req_to_token, rows=[0, 1], prefix_lens=[300, 0], seq_lens=[400, 10])
+    finally:
+        torch.cuda.set_sync_debug_mode(0)
+    assert kv._reused.tolist() == [1, 105]
+
+
+def test_a_kv_only_prefill_shifts_the_ids_writes_the_draft_kv_and_relays_a_placeholder(monkeypatch):
+    pytest.importorskip("sglang.srt.speculative.eagle_info")
+    import torch
+    from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+
+    from eagle_harness.sglang.draft_kv import kv_only_prefill
+
+    calls = []
+    out = SimpleNamespace(next_token_ids=torch.tensor([7, 8]), kv_loc_plan="plan",
+                          logits_output=SimpleNamespace(hidden_states="target hidden"))
+
+    def forward(batch, pp_proxy_tensors=None, capture_hidden_mode=None, return_kv_loc_plan=False):
+        calls.append(("target", capture_hidden_mode.name, return_kv_loc_plan))
+        return out
+
+    def init_new(batch, runner, **kw):
+        calls.append(("draft batch", batch.spec_info.hidden_states, kw["kv_loc_plan"]))
+        return SimpleNamespace(input_ids=batch.input_ids.clone(), extend_seq_lens=torch.tensor([3, 2]))
+
+    monkeypatch.setattr(ForwardBatch, "init_new", init_new)
+    runner = SimpleNamespace(token_to_kv_pool="draft pool", model=SimpleNamespace(
+        write_prefill_kv=lambda fb, pool: calls.append(("kv", fb.input_ids.tolist(), pool))))
+    batch = SimpleNamespace(reqs=[object(), object()], seq_lens=torch.tensor([5, 9]), input_ids=torch.tensor([1, 2, 3, 4, 5]),
+                            chunked_req_next_prompt_token=None, chunked_req=None)
+    result = kv_only_prefill(
+        batch, SimpleNamespace(forward_batch_generation=forward), runner, topk=4, hidden=(16, torch.bfloat16),
+        on_publish=lambda lengths: calls.append(("publish", lengths.tolist())),
+    )
+    assert calls == [("target", "FULL", True), ("publish", [5, 9]), ("draft batch", "target hidden", "plan"),
+                     ("kv", [2, 3, 7, 5, 8], "draft pool")]  # each position's next token; the last: sampled tokens
+    assert result is out and out.kv_loc_plan is None
+    draft = result.next_draft_input
+    assert draft.bonus_tokens is out.next_token_ids
+    assert draft.topk_p.shape == (2, 4) and draft.topk_index.shape == (2, 4) and draft.hidden_states.shape == (2, 16)
+
+
+def test_the_kv_only_pass_writes_the_keys_and_values_the_attention_would():
+    pytest.importorskip("sglang")
+    import torch
+
+    memory_pool = pytest.importorskip("sglang.srt.mem_cache.memory_pool")
+    if not hasattr(memory_pool, "KVWriteLoc"):
+        pytest.skip("engine without KV write plans")
+    from eagle_harness.sglang.models.llama_eagle4 import LlamaForCausalLMEagle4
+
+    torch.manual_seed(0)
+    heads, dim, hidden = 2, 4, 8  # MHA: q, k and v each 8 wide; the layer reads concat(embeds, hidden) = 16
+    weight = torch.randn(3 * heads * dim, 2 * hidden)
+    written = {}
+    radix = SimpleNamespace(is_cross_attention=False, k_scale=None, v_scale=None)
+    attn = SimpleNamespace(
+        qkv_proj=SimpleNamespace(weight=weight), q_size=heads * dim, kv_size=heads * dim, head_dim=dim,
+        num_kv_heads=heads, attn=radix, rotary_emb=lambda positions, q, k: (q, k + positions[:, None]),
+    )
+    layer = SimpleNamespace(input_layernorm=lambda x: x, hidden_norm=lambda x: 2 * x, attn_norm=False, self_attn=attn)
+    embeds = torch.randn(3, hidden)
+    model = SimpleNamespace(hidden_size=hidden, layers=[layer], _embed=lambda ids: embeds[ids])
+    pool = SimpleNamespace(set_kv_buffer=lambda layer, loc, k, v, ks, vs: written.update(layer=layer, loc=loc, k=k, v=v))
+    target = torch.randn(3, hidden)
+    fb = SimpleNamespace(spec_info=SimpleNamespace(hidden_states=target), input_ids=torch.tensor([2, 0, 1]),
+                         positions=torch.tensor([10.0, 11.0, 12.0]),
+                         out_cache_loc=torch.tensor([5, 6, 7]), out_cache_loc_is_physical=True)
+    draft = SimpleNamespace(model=model)
+    LlamaForCausalLMEagle4.write_prefill_kv(draft, fb, pool)
+    _, k, v = (torch.cat([embeds[fb.input_ids], 2 * target], -1) @ weight.T).split(heads * dim, -1)
+    assert written["layer"] is radix and torch.equal(written["loc"].loc, fb.out_cache_loc) and written["loc"].physical
+    torch.testing.assert_close(written["k"], (k + fb.positions[:, None]).view(3, heads, dim))
+    torch.testing.assert_close(written["v"], v.view(3, heads, dim))
+
+
+@pytest.mark.parametrize("skip", [True, False])
+def test_the_worker_prefill_routes_and_marks_the_written_slots(monkeypatch, skip):
+    pytest.importorskip("sglang")
+    import torch
+    from sglang.srt.model_executor.forward_batch_info import ForwardMode
+    from sglang.srt.speculative import eagle_utils
+
+    from eagle_harness.sglang import worker as module
+    from eagle_harness.sglang.draft_kv import StaleDraftKV
+
+    calls = []
+    worker = module.EagleHarnessWorker.__new__(module.EagleHarnessWorker)
+    worker._stale_kv = StaleDraftKV(16, "cpu")
+    worker._stale_kv.target_only(torch.tensor([2]))  # slot 2: decoded natively earlier
+    worker._native_decode = SimpleNamespace(skips_draft=lambda batch: skip)
+    worker.req_to_token_pool = SimpleNamespace(req_to_token=torch.arange(16).view(2, 8))
+    worker.topk, worker._target_worker = 4, "target"
+    worker._draft_worker = SimpleNamespace(draft_runner="draft")
+    worker._kv_only_prefill = True
+    monkeypatch.setattr(module.EagleHarnessWorker, "_draft_context", lambda self: __import__("contextlib").nullcontext())
+    monkeypatch.setattr(eagle_utils, "get_draft_recurrent_hidden_state_spec", lambda runner: (8, torch.float32))
+    monkeypatch.setattr(module, "kv_only_prefill", lambda batch, target, runner, **kw: calls.append(("kv only", target, runner, kw["hidden"])) or "t")
+    monkeypatch.setattr(module.EAGLEWorkerV2, "forward_batch_generation", lambda self, *a: calls.append("drafted") or "d")
+    batch = SimpleNamespace(forward_mode=ForwardMode.EXTEND, is_extend_in_batch=False, return_hidden_states=False,
+                            out_cache_loc=torch.tensor([4, 5]), reqs=[SimpleNamespace(multimodal_inputs=None)], prefix_lens=[4], extend_lens=[2],
+                            req_pool_indices_cpu=torch.tensor([0]))
+    assert worker._prefill(batch, None, None, None) == ("t" if skip else "d")
+    assert calls == ([("kv only", "target", "draft", (8, torch.float32))] if skip else ["drafted"])
+    assert worker._stale_kv.stale[[4, 5]].tolist() == [False, False]  # both routes write the draft KV
+    assert worker._stale_kv._reused.tolist() == ([0, 0] if skip else [1, 1])  # the drafted prefill read slot 2
+
+
+def test_the_prefill_reads_batch_fields_the_engine_has():
+    """The engine fields the prefill routing and the KV-only pass read (the fakes above cannot catch a renamed
+    field): ScheduleBatch, and ForwardBatch where the engine has KV write plans."""
+    pytest.importorskip("sglang")
+    import dataclasses
+
+    from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
+    from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+
+    from eagle_harness.sglang.draft_kv import kv_only_prefill_supported
+
+    fields = {f.name for f in dataclasses.fields(ScheduleBatch)}
+    assert {"forward_mode", "is_extend_in_batch", "return_hidden_states", "out_cache_loc", "reqs", "prefix_lens",
+            "extend_lens", "seq_lens", "input_ids", "chunked_req"} <= fields
+    assert "req_pool_indices_cpu" in fields or hasattr(Req, "req_pool_idx")
+    if kv_only_prefill_supported():
+        fb = {f.name for f in dataclasses.fields(ForwardBatch)}
+        assert {"input_ids", "extend_seq_lens", "positions", "spec_info", "out_cache_loc",
+                "out_cache_loc_is_physical"} <= fb

@@ -234,6 +234,63 @@ def test_the_layer_attends_over_the_fused_input_and_reduces_a_moe_partial_sum(mo
         assert torch.equal(mlp, (attn - res) * 3 * scale)
 
 
+def _prefill_batch(mode, capture="LAST", return_logprob=False, lens=(2, 3)):
+    from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
+
+    hidden = torch.arange(sum(lens) * 2, dtype=torch.float32).view(-1, 2)
+    return SimpleNamespace(
+        forward_mode=getattr(ForwardMode, mode),
+        return_logprob=return_logprob,
+        capture_hidden_mode=getattr(CaptureHiddenMode, capture),
+        extend_seq_lens=torch.tensor(lens),
+        spec_info=SimpleNamespace(hidden_states=hidden),
+    )
+
+
+def _model(norm_output: bool, mlp_rows: list):
+    """An ``Eagle4Model`` shell over the affine layer shell; ``mlp_rows`` records how many rows each MLP call got."""
+    model = object.__new__(llama_eagle4.Eagle4Model)
+    torch.nn.Module.__init__(model)
+    model.hidden_size, model.norm_output = 2, norm_output
+    layer = _layer(attn_norm=False, reduce_mlp=False)
+    layer.self_attn = lambda positions, hidden_states, forward_batch: hidden_states[:, :2] + hidden_states[:, 2:] + 100
+
+    def mlp(x):
+        mlp_rows.append(x.shape[0])
+        return x * 3
+
+    layer.mlp = mlp
+    model.layers = [layer]
+    model.norm = lambda x: x * 0.5
+    model._embed = lambda ids: ids[:, None].float().expand(-1, 2) / 7
+    return model
+
+
+@pytest.mark.parametrize("norm_output", [True, False])
+def test_a_prefill_runs_the_mlp_on_each_request_last_row_only(norm_output):
+    ids = torch.arange(5)
+    rows: list = []
+    model = _model(norm_output, rows)
+    full_normed, (full_aux,) = model(ids, None, _prefill_batch("EXTEND", capture="FULL"))
+    assert rows == [5]
+    for mode in ("EXTEND", "MIXED"):
+        rows.clear()
+        normed, (aux,) = model(ids, None, _prefill_batch(mode))
+        assert rows == [2]  # one row per request, the attention saw all 5
+        last = torch.tensor([1, 4])
+        assert torch.equal(normed[last], full_normed[last]) and torch.equal(aux[last], full_aux[last])
+        assert normed.shape == full_normed.shape and aux.shape == full_aux.shape
+
+
+@pytest.mark.parametrize(
+    "mode, capture, return_logprob",
+    [("DECODE", "LAST", False), ("TARGET_VERIFY", "LAST", False), ("DRAFT_EXTEND_V2", "LAST", False),
+     ("EXTEND", "FULL", False), ("EXTEND", "LAST", True)],
+)
+def test_other_forwards_run_the_mlp_on_every_row(mode, capture, return_logprob):
+    assert llama_eagle4.prefill_read_rows(_prefill_batch(mode, capture, return_logprob)) is None
+
+
 # --- The real Nemotron draft config, the latent MoE block and its checkpoint experts ---
 
 

@@ -28,18 +28,13 @@ kernel is a startup check.
 On SGLang with four GPUs, the [high-load recipe](quickstart-sglang.md#high-load) keeps pace with plain decoding up
 to 512 concurrent requests. These limits apply around it:
 
-- The SGLang command of the README quick start is slower than plain decoding above about 32 to 64 concurrent
-  requests. On one B300 it measured 0.73× the same engine without speculation at concurrency 64 and 0.59× at 256.
-  With `--tp-size 4` it measured 0.80× at 64, 0.48× at 128, 0.37× at 256 and 0.32× at 512 (2 starts each). Three
-  settings cause it. The radix cache, on by default, makes this hybrid model track prefix-cache state that a batch
-  switching to plain decoding cannot carry yet, so the server speculates at every load. The default tree caps a
-  four-GPU server at 32 running requests, while plain decoding admits several hundred. On one GPU, the engine
-  reserves verify state for every admitted request, so a speculative server admits about a quarter of the
-  requests plain decoding does. For high load on four GPUs, use the high-load recipe. A fix for the default
-  command is planned.
-- High load on one GPU is not supported yet. On one GPU, a speculative server started with
-  `--disable-radix-cache` stops during draft graph capture, so keep the radix cache on there. The high-load recipe
-  is for four GPUs, and the server log's advice to add `--disable-radix-cache` applies to four GPUs only.
+- The SGLang command of the README quick start decodes without speculation at high load. With its default cache
+  settings it measured 1.00× the same engine without speculation at 64, 128 and 256 concurrent requests and 0.99×
+  at 512 on one B300, and from 0.99× to 1.03× at 64 to 512 on four (4 starts each). On four GPUs at 8 concurrent
+  requests its throughput is 0.97× that of 0.1.2 ([0.1.3 release notes](release-notes/0.1.3.md#limits)).
+- On one GPU, a speculative server started with `--disable-radix-cache` stops during draft graph capture, so keep
+  the radix cache on there. The high-load recipe is for four GPUs, and the server log's advice to add
+  `--disable-radix-cache` applies to four GPUs only.
 - The first start of the high-load recipe on a machine compiles kernels and measures its live costs during its
   first requests. It measured 0.95× at 64 and 0.97× at 128 concurrent requests, and restarts with warm caches
   1.01× and 1.00× (3 starts each).
@@ -64,6 +59,12 @@ to 512 concurrent requests. These limits apply around it:
 
 ## Performance and correctness in progress
 
+- SGLang greedy correctness at 64 or more concurrent requests: 7 of 12,096 checked outputs in the 0.1.3 release
+  check fall outside the fp32 tolerance and are not reproduced by plain decoding at the same prefix. They are on the
+  one-GPU README command at 128 concurrent requests (one prompt in each of four starts), the four-GPU measured
+  recipe at 64 (one prompt in each of two starts) and the four-GPU high-load recipe at 512 (one prompt in one
+  start). Version 0.1.4 compares against plain decoding at the same batch size
+  ([0.1.3 release notes](release-notes/0.1.3.md#limits)).
 - SGLang TP4 single-request and 32K-context optimization is in progress, as are TP8 concurrency-8 prefill
   overhead and intermittent stalls. Repeated passes in one process are not independent server starts.
 - SGLang native-OFF, including OFF forced by a cost profile, uses the engine's per-variant forward-mode
@@ -108,12 +109,18 @@ to 512 concurrent requests. These limits apply around it:
 
 ## TokenSpeed
 
-TokenSpeed serves EAGLE-4 with static and calibrated trees, chains and sampled trees on NVIDIA GPUs. Install the
+TokenSpeed serves EAGLE-4 in serve mode with calibrated trees, chains and sampled trees on NVIDIA GPUs. Install the
 engine, its native packages and `eagle-harness` together with the [install command](install.md#tokenspeed-cuda),
-because the adapter needs the matching engine hooks. The 0.1.2 measurements cover serve mode at TP1 and TP4,
-temperature 0 and 1, 32K-token contexts and four-GPU chains
+because the adapter needs the matching engine hooks. On four B300 GPUs, the 0.1.3 build passed TP4 calibration,
+greedy serving from that profile (twenty prompts: 3 identical, 17 first divergences within the fp32 tolerance) and
+sampled tree serving at temperature 1. The 0.1.2 measurements cover serve mode at TP1, TP4 and TP8, temperature 0
+and 1, 32K- and 128K-token contexts and four-GPU chains on the 0.1.2 engine build
 ([support matrix](support-matrix.md#012-speed-by-engine-and-concurrency)).
 
+- Static mode (`"mode": "static"`) stops at server start with the released EAGLE-4 draft, whose attention layer
+  uses a 4096-token sliding window. The TokenSpeed 0.1.3 engine raises `draft trees have no sliding-window or
+  attention-sink path yet` when it builds the draft tree. Serve mode runs the draft tree in `eagle-harness` and
+  is not affected. Static-mode support for sliding-window drafts is planned for 0.1.4.
 - TokenSpeed runs on CUDA only. On AMD GPUs, serve with SGLang ROCm ([AMD guide](quickstart-amd.md)).
 - On one GPU, start the server with `--disable-kvstore`. By default TokenSpeed adds a host KV cache tier twice the
   size of the GPU's KV cache, and a one-GPU server cannot pin that much host memory. The guide's commands pass the
@@ -132,15 +139,15 @@ temperature 0 and 1, 32K-token contexts and four-GPU chains
     is not a native no-speculation round.
   - Live cost measurement: serve mode reads cost tables measured for TokenSpeed.
 - Serve mode needs cost tables measured for TokenSpeed. Tree and chain cost data should match the served shape, TP
-  size, target, draft and recurrent-state dtype. Only TP4 tables exist; the TP1 and TP8 measurements reuse them.
+  size, target, draft and recurrent-state dtype. EAGLE-4 0.1.3 ships no TokenSpeed tables: calibrate once on your
+  setup ([TokenSpeed guide](quickstart-tokenspeed.md#calibrate-costs)). The 0.1.3 build was checked at TP4. TP1,
+  TP8 and chains were measured on 0.1.2.
 - Retraction is not qualified. TokenSpeed reserves pages when it admits a request and queues the rest, so the
   measured servers never retract. With retractions forced by a test-only setting, one prompt in three chain starts
   fails the fp32 rule ([support matrix](support-matrix.md#012-correctness-and-request-features)).
 - EAGLE-3 drafts are not checked on TokenSpeed. TP4 single-request optimization is in progress.
-- Static mode is a setup check, because its CUDA install smoke generates text with one first divergence above the
-  fp32 gate. The serve-mode install smoke passes its greedy prompts with the CUDA 13.2 JIT. On Ubuntu 26.04 / glibc
-  2.43, set `CUDA_HOME` to CUDA 13.2 ([troubleshooting](troubleshooting.md#install-problems)). These checks cover
-  the toolkits named here.
+- On Ubuntu 26.04 / glibc 2.43, set `CUDA_HOME` to CUDA 13.2 before the first start, which compiles the
+  tree-round CUDA sources ([troubleshooting](troubleshooting.md#install-problems)).
 
 ## Calibration
 
@@ -161,15 +168,13 @@ The [install guide](install.md) describes the release path: `eagle-harness` pack
 patched engine wheels on the GitHub Pages indexes, and images on GHCR. Model and draft weights come from
 Hugging Face under their owners' licenses.
 
-- The published SGLang and vLLM images passed serving and correctness checks, and the published TokenSpeed image
-  passed a GPU check in serve mode ([support matrix](support-matrix.md#011-installation-checks)). They carry
-  `eagle-harness` 0.1.1 and the 0.1.1 engines. Use the image commands in the engine guides with them.
+- Use the [install guide](install.md#docker-images) for image versions. TokenSpeed's `:0.1.3` image uses the
+  hooks-only engine and harness plugin; earlier TokenSpeed image checks are historical, not qualification of this build.
 - The files under `docker/` show how the release images are built. The checked CUDA images carry a prebuilt
   `eagle-harness` wheel, so the published images are the checked path. The TokenSpeed Dockerfile takes an
   explicit compatible `BASE_IMAGE`.
 - On AMD, install with pip: the ROCm closure is clean-installed from the public indexes and inference-tested on
   an MI355X. The ROCm Dockerfile is being container-qualified, and no ROCm image is published yet.
-- TokenSpeed serve mode uses cost tables measured for TokenSpeed on the served setup. EAGLE-4 does not ship them
-  or a command that measures them yet, so the [TokenSpeed guide](quickstart-tokenspeed.md) starts in static
-  mode as a setup check.
+- TokenSpeed serve mode uses cost tables measured for TokenSpeed on the served setup. EAGLE-4 does not ship them,
+  so the [TokenSpeed guide](quickstart-tokenspeed.md) calibrates them before the first server start.
 - Use the pinned artifacts: stock engines and unpinned packages do not carry the EAGLE-4 hooks.

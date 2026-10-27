@@ -32,7 +32,7 @@ UPLOAD_CHANNELS = (*CHANNELS, "harness", "rocm-runtime")
 ROCM_LOCK = Path(__file__).resolve().parents[1] / "docker/rocm/requirements.lock"
 REQUIRED = {
     "harness": {"eagle-harness"},
-    "cu130": {"sglang", "vllm", "tokenspeed", "tokenspeed-kernel", "tokenspeed-scheduler"},
+    "cu130": {"sglang", "vllm", "tokenspeed", "tokenspeed-kernel", "tokenspeed-scheduler", "tokenspeed-engine"},
     "rocm": {"sglang"},
 }
 WHEEL_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+\-]*\.whl")

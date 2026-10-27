@@ -123,7 +123,8 @@ def _tree_step_kernel(
         c = tl.arange(0, DELTA_P)[None, :]
         e = c - CAP
         old = tl.load(best_prev_ptr + b * best_stride + c, mask=c < CAP, other=0.0, cache_modifier=".cg")
-        extra = tl.load(layer_top_ptr + b * K + e, mask=(e >= 0) & (e < j), other=0.0, cache_modifier=".cg")
+        # J_P rounds K + 1 up to a power of two: rows j > K are never stored, and must not read past the row's K.
+        extra = tl.load(layer_top_ptr + b * K + e, mask=(e >= 0) & (e < j) & (e < K), other=0.0, cache_modifier=".cg")
         sums = tl.cumsum(tl.sort(old + extra, dim=1, descending=True), axis=1)
         tl.store(deltas_ptr + b * deltas_stride + c * (K + 1) + j, sums, mask=(j <= K) & (c < V))
 

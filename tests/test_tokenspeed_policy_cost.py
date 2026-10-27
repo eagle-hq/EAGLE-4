@@ -14,10 +14,8 @@ from eagle_harness.core.cost_model import CostModel, CostModelParams, SizeClass
 from eagle_harness.core.cost_table import BatchCostTable, CostCurve, IntervalCost, load_cost_tables
 from eagle_harness.core.limits import ComputeIntensity
 from eagle_harness.tokenspeed.costs import tree_policy_costs
-
-pytest.importorskip("tokenspeed.runtime.execution.drafter.tree_round.device_policy")
-from tokenspeed.runtime.execution.drafter.tree_round.device_policy import DevicePolicy, write_round_slots
-from tokenspeed.runtime.execution.drafter.tree_round.policy_cost import build_tables
+from eagle_harness.tokenspeed.tree_round.device_policy import DevicePolicy, write_round_slots
+from eagle_harness.tokenspeed.tree_round.policy_cost import build_tables
 
 
 def cost_fixture():

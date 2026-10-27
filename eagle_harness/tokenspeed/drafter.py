@@ -16,7 +16,7 @@ of TokenSpeed's:
   window and parents TokenSpeed verifies with its own tree attention and GDN tree verify.
 
 Static rounds use Eagle's complete graph. Serve rounds delegate chain/tree execution, fixed-ahead sampled-depth
-planning and recorded-q rejection to the engine. Cost decisions come only from eagle_harness.core; native EAGLE-3
+planning and recorded-q rejection to the harness. Cost decisions come only from eagle_harness.core; native EAGLE-3
 and reduced-vocabulary maps stay owned by TokenSpeed.
 """
 
@@ -27,8 +27,6 @@ from dataclasses import replace
 from typing import Any
 
 import torch
-from tokenspeed.runtime.execution.drafter.tree_round.device_policy import DevicePolicy
-from tokenspeed.runtime.execution.drafter.tree_round.dynamic import DynamicDrafter
 from tokenspeed.runtime.models.llama_eagle3 import LlamaForCausalLMEagle3
 from typing_extensions import override
 
@@ -38,13 +36,14 @@ from eagle_harness.core.limits import ComputeIntensity
 from eagle_harness.core.models import target_is_moe
 from eagle_harness.tokenspeed.config import ALGORITHM_NAME, TokenSpeedConfig, parse_algorithm_config
 from eagle_harness.tokenspeed.costs import tree_policy_costs
-from eagle_harness.tokenspeed.hooks import tree_policy
 from eagle_harness.tokenspeed.models import CandidateRows, LlamaForCausalLMEagle4
 from eagle_harness.tokenspeed.tree_lanes import advance_lane_masks, lane_bits, seed_lane_masks
 from eagle_harness.tokenspeed.tree_lanes import verify_window as fill_verify_window
+from eagle_harness.tokenspeed.tree_round.device_policy import DevicePolicy
+from eagle_harness.tokenspeed.tree_round.dynamic import DynamicDrafter
 
-# TokenSpeed's own candidate ranking, under the installed engine's name (see hooks.tree_policy).
-_ENGINE_CANDIDATES = getattr(DynamicDrafter, tree_policy().candidates)
+# The harness round executor ranks ordinary EAGLE-3 logits.
+_ENGINE_CANDIDATES = DynamicDrafter.round_candidates
 
 
 class HarnessDrafter(DynamicDrafter):
@@ -59,6 +58,7 @@ class HarnessDrafter(DynamicDrafter):
         self.config: TokenSpeedConfig | None = None  # set by configure_algorithm, else resolved in bind_tree
         self.tree: DraftTree | None = None
         self._lane_bits: torch.Tensor | None = None
+        self.measurement = None
 
     def configure_algorithm(self, algorithm_config: Mapping[str, Any]) -> None:
         self.config = parse_algorithm_config(algorithm_config)
@@ -74,9 +74,27 @@ class HarnessDrafter(DynamicDrafter):
 
     @property
     def dynamic(self) -> bool:
-        return self.config is not None and self.config.mode is Mode.SERVE
+        return self.config is not None and self.config.mode in (Mode.SERVE, Mode.CALIBRATE)
 
     def _make_policy(self, verify_num: int, topk: int, depth: int) -> DevicePolicy:
+        if self.config.mode is Mode.CALIBRATE:
+            from tokenspeed.runtime.distributed.process_group_manager import process_group_manager
+
+            from eagle_harness.tokenspeed.measurement import CostMeasurement, MeasurePolicy
+
+            mapping = self.draft_model_runner.mapping
+            self.measurement = CostMeasurement(
+                run_dir=self.config.data_path,
+                tree_depth=depth,
+                tp_group=(process_group_manager.get_device_process_group(mapping.attn.tp_group)
+                          if mapping.attn.tp_size > 1 else None),
+                rank=mapping.rank,
+                device=self.device,
+            )
+            return MeasurePolicy(
+                verify_num=verify_num, node_top_k=topk, tree_depth=depth,
+                compute_intensity=self.config.intensity.value, device=self.device,
+            )
         model = None if self.config.fully_scheduled else build_cost_model(
             self.config,
             node_top_k=topk,
@@ -103,18 +121,18 @@ class HarnessDrafter(DynamicDrafter):
     def bind_tree(self, tree_spec: Any) -> None:
         if self.config is None:  # launched without --speculative-algorithm-config: the defaults, or their refusal
             self.config = parse_algorithm_config(None)
+        if self._sampling_backend.config.enable_speculative_sampling:
+            raise ValueError("Use sampled_proposals in --speculative-algorithm-config, not --enable-speculative-sampling")
         if self.dynamic:
             shape = tree_spec.config
             self.bind_dynamic_tree(tree_spec, self._make_policy(shape.num_nodes, shape.topk, shape.num_steps))
-            if self._sampling_backend.config.enable_speculative_sampling:
+            if self.config.sampled_proposals:
                 self.enable_sampled_trees(
                     num_candidates=(self.draft_model.num_candidates if isinstance(self.draft_model, LlamaForCausalLMEagle4)
                                     else min(1024, getattr(self.draft_model.config, "draft_vocab_size", None) or self.draft_model.config.vocab_size)),
                     seed=self._sampling_backend.config.random_seed,
                 )
             return
-        if self._sampling_backend.config.enable_speculative_sampling:
-            raise ValueError("recorded-q proposals require serve mode; static trees support target sampling")
         super().bind_tree(tree_spec)
         config = tree_spec.config
         if config.num_steps < 2:
@@ -145,6 +163,49 @@ class HarnessDrafter(DynamicDrafter):
         return super().run(base_ctx, logits_output, output_tokens, accept_lengths)
 
     # ------------------------------------------------------------------ the tree policy
+    def prepare_target_forward(self, ctx: Any) -> None:
+        super().prepare_target_forward(ctx)
+        if self.measurement is not None and ctx.num_extends == 0:
+            self.measurement.verify_start.record()
+
+    def rewrite_verify_outputs(self, ctx: Any, output_tokens: torch.Tensor, accept_lengths: torch.Tensor) -> None:
+        """Calibration commits one fixed token so context grows by one each round."""
+        if self.measurement is None or ctx.num_extends > 0:
+            return
+        self.measurement.verify_end.record()
+        rows, width = accept_lengths.shape[0], self.spec_num_tokens
+        accept_lengths.fill_(1)
+        output_tokens.view(rows, width)[:, 0].copy_(self.measurement.commit_token.expand(rows))
+        path = self._sampling_backend.accepted_path(rows, width)
+        path[:, 0].zero_()
+        path[:, 1:].fill_(-1)
+
+    def has_round_graphs(self, graph_bs: int) -> bool:
+        return self.measurement is None and super().has_round_graphs(graph_bs)
+
+    def finish_round(self, ctx: Any, graph_bs: int | None) -> None:
+        measurement = self.measurement
+        if measurement is None or ctx.bs == 0 or self.input_buffers.all_extends_mid_chunk:
+            return super().finish_round(ctx, graph_bs)
+        from tokenspeed.runtime.utils.host_sync import allow_host_sync
+
+        with allow_host_sync("calibration measures between drained GPUs"):
+            if ctx.num_extends > 0:
+                measurement.on_extend()
+                self.policy.write_full_round()
+                return super().finish_round(ctx, graph_bs)
+            measurement.record_verify(ctx.bs)
+            cache_len = int(self._round["frontier"][:ctx.bs].sum()) // ctx.bs
+            if measurement.measured_batch_size is not None:
+                self.policy.next_widths(ctx.bs, measurement.measured_batch_size)
+            self.policy.write_round()
+            measurement.begin_draft()
+            super().finish_round(ctx, graph_bs)
+            with torch.cuda.stream(self._round_stream):
+                measurement.end_draft(ctx.bs, self.policy.draft_width, self.policy.verify_width_now, cache_len)
+            if measurement.complete():
+                measurement.write_model_records()
+
     # Defined under TokenSpeed's public names (hooks.PUBLIC_POLICY) and aliased to the release engine's private ones
     # at the end of the class; each engine calls only its own names.
     def round_candidates(self, rows: CandidateRows) -> tuple[torch.Tensor, torch.Tensor]:

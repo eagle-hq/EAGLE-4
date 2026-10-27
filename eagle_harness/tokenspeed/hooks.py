@@ -20,7 +20,8 @@ Two TokenSpeed lines carry the hooks, told apart by :func:`contract`:
 On both, the adapter needs the plugin registries, the algorithm config and the target's aux hidden states for a plugin
 algorithm, tree layout for a plugin chain, sliding-window tree lanes (the EAGLE-4 draft layer has a window), the
 drafter round protocol and tree lanes, the tree policy of TokenSpeed's ``Eagle`` drafter that
-:class:`~eagle_harness.tokenspeed.drafter.HarnessDrafter` replaces, and the dynamic tree with its device policy.
+:class:`~eagle_harness.tokenspeed.drafter.HarnessDrafter` replaces. The harness owns the dynamic tree and device policy.
+Recorded-proposal verification is checked separately when sampled trees are enabled.
 """
 
 from __future__ import annotations
@@ -40,8 +41,7 @@ REQUIRED_CAPABILITIES = frozenset(
         "drafter.round_protocol",
         "drafter.tree_lanes",
         "drafter.tree_policy",
-        "drafter.dynamic_tree",
-        "drafter.sampled_trees",
+        "sampling.tree_sampler",
     }
 )
 
@@ -63,13 +63,11 @@ class TreePolicy(NamedTuple):
 PUBLIC_POLICY = TreePolicy("round_candidates", "seed_tree", "expand_tree", "verify_window")
 RELEASE_POLICY = TreePolicy("_candidates", "_seed_tree_lanes", "_expand_tree_lanes", "_draft_window")
 
-_DYNAMIC = "tokenspeed.runtime.execution.drafter.tree_round.dynamic:DynamicDrafter"
 _EAGLE = "tokenspeed.runtime.execution.drafter.eagle:Eagle"
 
 
 def _policy_hooks(names: TreePolicy) -> tuple[Hook, ...]:
     return (
-        Hook(f"{_DYNAMIC}.{names.candidates}", ("logits_output",)),
         Hook(f"{_EAGLE}.{names.seed}", ("bs", "logits_output", "frontier")),
         Hook(f"{_EAGLE}.{names.expand}", ("bs", "step", "logits_output")),
         Hook(f"{_EAGLE}.{names.window}", ("bs", "next_tokens")),
@@ -78,6 +76,8 @@ def _policy_hooks(names: TreePolicy) -> tuple[Hook, ...]:
 
 HOOKS: tuple[Hook, ...] = (
     Hook("tokenspeed.runtime.plugins:PLUGIN_API_VERSION"),
+    Hook("tokenspeed.runtime.sampling.backends.base:SamplingBackend.bind_tree_sampler", ("factory",)),
+    Hook("tokenspeed.runtime.sampling.backends.base:SamplingBackend.supports_tree_sampler"),
     Hook(
         "tokenspeed.runtime.plugins.registry:register_drafter",
         ("algorithm", "drafter_cls", "model_cls", "captures_aux_hidden_states", "uses_tree_layout"),
@@ -88,9 +88,7 @@ HOOKS: tuple[Hook, ...] = (
     Hook("tokenspeed.runtime.execution.drafter:drafter_captures_aux_hidden_states", ("algorithm",)),
     Hook(f"{_EAGLE}.bind_tree", ("tree_spec",)),
     Hook(f"{_EAGLE}.bind_tree_lanes", ("tree_spec",)),
-    Hook(f"{_DYNAMIC}.bind_dynamic_tree", ("tree_spec", "policy")),
-    Hook(f"{_DYNAMIC}.enable_sampled_trees", ("num_candidates", "seed")),
-    Hook("tokenspeed.runtime.execution.drafter.tree_round.device_policy:DevicePolicy", ("costs", "device")),
+    Hook("tokenspeed.runtime.execution.drafter.base:BaseDrafter.prepare_round_sampling", ("sampling_params_list",)),
     Hook("tokenspeed.runtime.execution.drafter.base:BaseDrafter.replay_decode_graph", ("graph", "bs", "graph_bs")),
     Hook("tokenspeed.runtime.execution.drafter.base:BaseDrafter.finish_round", ("ctx", "graph_bs")),
     Hook("tokenspeed.runtime.execution.drafter.base:BaseDrafter.complete_round", ()),
@@ -115,6 +113,20 @@ RELEASE_HOOKS: tuple[Hook, ...] = (
         ("lanes", "step"),
     ),
 )
+
+
+SAMPLED_HOOKS = (
+    Hook("tokenspeed.runtime.sampling.tree_verify:DraftTreeQ.zeros", ("rows", "num_slots", "num_candidates", "num_nodes", "device")),
+    Hook("tokenspeed.runtime.sampling.tree_verify:TreeVerifyBatch.draft_q"),
+    Hook("tokenspeed.runtime.execution.runtime_states:RuntimeStates.init_draft_tree_q", ("num_nodes", "num_slots", "num_candidates")),
+    Hook("tokenspeed.runtime.sampling.backends.base:SamplingBackend.verifies_draft_tree_q"),
+    Hook("tokenspeed.runtime.sampling.backends.base:SamplingBackend.speculative_sampling_pools"),
+)
+
+
+def sampled_hook_problems() -> list[str]:
+    """Recorded-proposal hooks required only when sampled trees are enabled."""
+    return [problem for hook in SAMPLED_HOOKS if (problem := _problem(hook))]
 
 
 def contract() -> str | None:

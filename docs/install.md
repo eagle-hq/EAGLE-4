@@ -24,7 +24,7 @@ containers, use a [published image](#docker-images) instead.
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install "eagle-harness[sglang]" "sglang==0.5.23.dev252+eagle.5" \
+pip install "eagle-harness[sglang]" "sglang==0.5.23.dev252+eagle.9" \
   --extra-index-url https://eagle-hq.github.io/EAGLE-4/whl/cu130/ \
   --extra-index-url https://download.pytorch.org/whl/cu130 \
   --extra-index-url https://pypi.nvidia.com
@@ -47,13 +47,16 @@ Then follow the [vLLM guide](quickstart-vllm.md).
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install "eagle-harness[tokenspeed]" "tokenspeed==0.1.1+eagle.5" \
-  "tokenspeed-scheduler==0.1.40+eagle.4" "tokenspeed-kernel==0.1.4+eagle.5" \
+pip install "eagle-harness[tokenspeed]" "tokenspeed==0.1.1+eagle.8" \
+  "tokenspeed-scheduler==0.1.42+eagle.8" "tokenspeed-kernel==0.1.4+eagle.8" \
+  "tokenspeed-engine==0.1.0+eagle.8" \
   --extra-index-url https://eagle-hq.github.io/EAGLE-4/whl/cu130/ \
   --extra-index-url https://download.pytorch.org/whl/cu130
 ```
 
-TokenSpeed runs on NVIDIA GPUs only. Then follow the [TokenSpeed guide](quickstart-tokenspeed.md).
+TokenSpeed runs on NVIDIA GPUs only. Then follow the [TokenSpeed guide](quickstart-tokenspeed.md), which calibrates
+cost tables and serves in serve mode. Static mode does not start with the released EAGLE-4 draft in this release
+([known limits](known-limits.md#tokenspeed)).
 
 ## What the indexes and pins are for
 
@@ -62,11 +65,11 @@ TokenSpeed runs on NVIDIA GPUs only. Then follow the [TokenSpeed guide](quicksta
 | `https://eagle-hq.github.io/EAGLE-4/whl/cu130/` | The patched SGLang, vLLM and TokenSpeed wheels. They carry a `+eagle.N` local version, so pip picks them only when the command pins that exact version. |
 | `https://download.pytorch.org/whl/cu130` | PyTorch built for CUDA 13.0, which the engine wheels need. |
 | `https://pypi.nvidia.com` | The `cuda-tile==1.6.0rc5` wheel that the SGLang engine pins. Without it pip builds that package from source. |
-| `tokenspeed-scheduler`, `tokenspeed-kernel` | TokenSpeed's native packages, built from the same source as the engine. The stock wheels do not work with it. |
+| `tokenspeed-scheduler`, `tokenspeed-kernel`, `tokenspeed-engine` | TokenSpeed's native packages and control plane, built from the same source as the engine. Install the matching versions together. |
 
 The engine wheels are assets of the [v0.1.0 GitHub release](https://github.com/eagle-hq/EAGLE-4/releases/tag/v0.1.0),
 and the index pages link to them with SHA-256 hashes. Their sources are [eagle-hq/sglang](https://github.com/eagle-hq/sglang),
-[eagle-hq/vllm](https://github.com/eagle-hq/vllm) and [eagle-hq/tokenspeed](https://github.com/eagle-hq/tokenspeed).
+[eagle-hq/vllm](https://github.com/eagle-hq/vllm) and [eagle-hq/tokenspeed, `eagle/v0.1.3`](https://github.com/eagle-hq/tokenspeed/tree/eagle/v0.1.3).
 `eagle-harness` itself is published only on PyPI.
 [docs/release.env](release.env) holds the same pins and URLs for scripts and image builds.
 [docker/sglang/requirements.lock](../docker/sglang/requirements.lock) pins the SGLang CUDA runtime dependencies by
@@ -81,7 +84,7 @@ command for each one.
 | --- | --- |
 | SGLang CUDA | `ghcr.io/eagle-hq/eagle-4-sglang:0.1.2` |
 | vLLM CUDA | `ghcr.io/eagle-hq/eagle-4-vllm:0.1.2` |
-| TokenSpeed CUDA | `ghcr.io/eagle-hq/eagle-4-tokenspeed:0.1.2` |
+| TokenSpeed CUDA | `ghcr.io/eagle-hq/eagle-4-tokenspeed:0.1.3` |
 | SGLang ROCm | not published, [build it](#build-the-rocm-image) |
 
 To run a newer `eagle-harness` in an image, run `pip install -U eagle-harness` inside the container.

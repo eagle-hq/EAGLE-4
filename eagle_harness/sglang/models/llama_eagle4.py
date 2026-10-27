@@ -46,7 +46,7 @@ from sglang.srt.layers.linear import QKVParallelLinear, ReplicatedLinear, RowPar
 from sglang.srt.layers.moe.utils import get_moe_a2a_backend
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.llama import LlamaDecoderLayer, LlamaForCausalLM
 from sglang.srt.runtime_context import get_parallel
@@ -142,6 +142,27 @@ def build_latent_moe(config, prefix: str) -> nn.Module:
     return NemotronHMoE(latent_moe_config(config), layer_idx=0, quant_config=None, prefix=prefix)
 
 
+def prefill_read_rows(forward_batch: ForwardBatch) -> Optional[torch.Tensor]:
+    """The rows a prefill's draft output is read at (each request's last position), or None for every row.
+
+    sglang's logits processor reads a prefill without input logprobs at ``cumsum(extend_seq_lens) - 1``, for the
+    logits and for the hidden state it keeps (capture LAST); the draft KV of every position is written by the
+    attention, before the rows are picked. Other modes, input logprobs and FULL capture read every row.
+    """
+    if forward_batch.forward_mode not in (ForwardMode.EXTEND, ForwardMode.MIXED) or forward_batch.return_logprob:
+        return None
+    if forward_batch.capture_hidden_mode.is_full() or forward_batch.extend_seq_lens is None:
+        return None
+    return torch.cumsum(forward_batch.extend_seq_lens, dim=0) - 1
+
+
+def _rows_in_place(values: torch.Tensor, rows: torch.Tensor, total: int) -> torch.Tensor:
+    """``values`` (one per row index) at their rows of a ``total``-row tensor; the other rows are zero."""
+    out = values.new_zeros((total, values.shape[-1]))
+    out[rows] = values
+    return out
+
+
 class Eagle4DecoderLayer(LlamaDecoderLayer):
     """Llama layer whose qkv reads ``concat(normed embed, normed hidden)`` (through ``eh_proj`` with ``attn_norm``)."""
 
@@ -188,15 +209,26 @@ class Eagle4DecoderLayer(LlamaDecoderLayer):
             attn.attn.sliding_window_size = window - 1
 
     def forward(
-        self, positions: torch.Tensor, embeds: torch.Tensor, hidden_states: torch.Tensor, forward_batch: ForwardBatch
+        self,
+        positions: torch.Tensor,
+        embeds: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        rows: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """The layer: norm the embeds and the hidden separately, attend over their concat, then the MLP."""
+        """The layer: norm the embeds and the hidden separately, attend over their concat, then the MLP.
+
+        Attention runs on every row (it writes their draft KV); with ``rows`` the rest of the layer runs on those rows
+        only and the outputs have one row per index.
+        """
         residual = hidden_states
         x = torch.cat([self.input_layernorm(embeds), self.hidden_norm(hidden_states)], dim=-1)
         if self.attn_norm:
             residual, _ = self.eh_proj(x)
             x = self.pre_attention_layernorm(residual)
         x = self.self_attn(positions=positions, hidden_states=x, forward_batch=forward_batch)
+        if rows is not None:
+            x, residual = x[rows], residual[rows]
         x, residual = self.post_attention_layernorm(x, residual)
         x = self.mlp(x)
         if self.reduce_mlp:
@@ -281,10 +313,15 @@ class Eagle4Model(nn.Module):
             hidden = self._project_target_features(hidden)
         if hidden.shape[0] == 0:
             return hidden, [hidden]
-        mlp_out, residual = self.layers[0](positions, embeds, hidden, forward_batch)
+        rows = prefill_read_rows(forward_batch)
+        mlp_out, residual = self.layers[0](positions, embeds, hidden, forward_batch, rows=rows)
         summed = residual + mlp_out
         normed = self.norm(summed)
-        return normed, [normed if self.norm_output else summed]
+        aux = normed if self.norm_output else summed
+        if rows is not None:
+            normed = _rows_in_place(normed, rows, hidden.shape[0])
+            aux = normed if self.norm_output else _rows_in_place(aux, rows, hidden.shape[0])
+        return normed, [aux]
 
 
 class LlamaForCausalLMEagle4(LlamaForCausalLM):
@@ -334,6 +371,34 @@ class LlamaForCausalLMEagle4(LlamaForCausalLM):
         logger.info(
             "eagle-harness: candidate top-k crossover %s",
             "built-in" if self._candidate_crossover is None else f"measured ({self._candidate_crossover} scores)",
+        )
+
+    def write_prefill_kv(self, forward_batch: ForwardBatch, pool) -> None:
+        """Write the draft KV of a prefill's positions into ``pool`` (the draft runner's) and nothing else: the
+        layer's input and its key/value projections (the qkv weight's k/v rows), RoPE on the keys, then the pool's
+        write door with the batch's write loc, as the attention backend writes it."""
+        from sglang.srt.mem_cache.memory_pool import KVWriteLoc
+
+        model = self.model
+        hidden = forward_batch.spec_info.hidden_states
+        if hidden.shape[-1] != model.hidden_size:
+            hidden = model._project_target_features(hidden)
+        layer = model.layers[0]
+        x = torch.cat([layer.input_layernorm(model._embed(forward_batch.input_ids)), layer.hidden_norm(hidden)], dim=-1)
+        if layer.attn_norm:
+            x = layer.pre_attention_layernorm(layer.eh_proj(x)[0])
+        attn = layer.self_attn
+        k, v = F.linear(x, attn.qkv_proj.weight[attn.q_size :]).split([attn.kv_size, attn.kv_size], dim=-1)
+        # The rotary op rotates query and key in place on CUDA; a one-head query keeps that cheap.
+        _, k = attn.rotary_emb(forward_batch.positions, k.new_empty((k.shape[0], attn.head_dim)), k)
+        radix = attn.attn
+        pool.set_kv_buffer(
+            radix,
+            KVWriteLoc.for_layer(forward_batch, radix),
+            k.view(-1, attn.num_kv_heads, attn.head_dim),
+            v.view(-1, attn.num_kv_heads, attn.head_dim),
+            getattr(radix, "k_scale", None),
+            getattr(radix, "v_scale", None),
         )
 
     def set_embed(self, embed: torch.Tensor) -> None:

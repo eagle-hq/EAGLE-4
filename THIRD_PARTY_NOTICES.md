@@ -14,6 +14,7 @@ points to the full license texts in [`LICENSES/`](LICENSES/).
 | `eagle_harness/kernels/mamba2_tree.py` | `vllm/model_executor/layers/mamba/ops/mamba_ssm.py` (per-token selective state update) and `python/sglang/kernels/ops/mamba/triton_ops/mamba_ssm.py` (parent-state reload of the tree-mode update) | vLLM and sglang, which adapted it from mamba (state-spaces/mamba) | Apache-2.0 (vLLM, sglang, mamba) |
 | `eagle_harness/sglang/models/llama_eagle4.py` | `python/sglang/srt/models/llama_eagle3.py` (decoder layer with the concatenated embedding and hidden-state input) | sglang, which adapted it from SafeAILab EAGLE `eagle/model/cnets.py` | Apache-2.0 (sglang, EAGLE) |
 | `eagle_harness/sglang/tail_mask.py` | `include/flashinfer/attention/variants.cuh` (`DefaultAttention`, as the attention variant's template) | FlashInfer | Apache-2.0 |
+| `eagle_harness/tokenspeed/tree_round/ops/csrc/tvm_ffi_utils.h` | `tvm_ffi_utils.h` (tensor validation and CUDA stream interop) | FlashInfer | Apache-2.0 |
 
 The engine adapters (`eagle_harness/sglang/`, `eagle_harness/vllm/`) also import, subclass and call sglang, vLLM and
 FlashInfer classes at run time. That code is not copied into eagle-harness: it comes from the engine you install,

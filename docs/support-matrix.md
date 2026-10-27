@@ -137,7 +137,8 @@ prefix in its checks goes directly to fp32 arbitration.
 ## 0.1.1 (released)
 
 `eagle-harness` 0.1.1 with `sglang==0.5.23.dev252+eagle.5`, the unchanged `vllm==0.32.0rc1.dev283+eagle.4`, and
-`tokenspeed==0.1.1+eagle.5` with `tokenspeed-kernel==0.1.4+eagle.5` and `tokenspeed-scheduler==0.1.40+eagle.4`.
+the TokenSpeed runtime, kernel and scheduler build shipped for 0.1.1, since withdrawn. These TokenSpeed results
+describe that historical build, not the hooks-only engine shipped for 0.1.3.
 The packages are installed from the published wheels into clean environments and served from outside any checkout.
 The SGLang ROCm install keeps the 0.1.0 engine and `eagle-harness` 0.1.0 through its hash lock, so the 0.1.0 MI355X
 row applies. TP8 and vLLM TP1/TP8 keep their 0.1.0 measurements.
@@ -222,7 +223,8 @@ TokenSpeed in serve mode 6 exact / 8 fp32-tolerance passes / 6 fp32-argmax.
 ## 0.1.2 (released, current)
 
 `eagle-harness` 0.1.2 with the 0.1.1 engines: `sglang==0.5.23.dev252+eagle.5`, `vllm==0.32.0rc1.dev283+eagle.4`,
-and `tokenspeed==0.1.1+eagle.5` with `tokenspeed-kernel==0.1.4+eagle.5` and `tokenspeed-scheduler==0.1.40+eagle.4`.
+and the unchanged TokenSpeed build measured for 0.1.1, since withdrawn. These TokenSpeed results describe
+that historical build, not the hooks-only engine shipped for 0.1.3.
 Every row runs on NVIDIA B300, on the release candidate build of `eagle-harness` 0.1.2 installed into clean
 environments with the published engine wheels and served from outside any checkout. In the same allocations, 0.1.2
 measured between 0.98× and 1.07× the 0.1.1 packages in every cell where both ran. The SGLang ROCm install keeps its
@@ -238,6 +240,7 @@ measured between 0.98× and 1.07× the 0.1.1 packages in every cell where both r
 | vLLM TP4 | ✅ 2.83× | ✅ 1.73× | ⚠️ 1.19× |
 | TokenSpeed TP4 | ✅ 3.13× | ✅ 2.00× | ✅ 1.40× |
 | TokenSpeed TP4, 32K-token context | ✅ 3.15× | — | — |
+| TokenSpeed TP4, 128K-token context | ✅ 3.37× | — | — |
 | TokenSpeed TP1 | ✅ 3.27× | ✅ 2.14× | ✅ 1.35× |
 | TokenSpeed TP8 | ✅ 2.91× | ✅ 1.57× | ✅ 1.14× |
 | TokenSpeed TP4 chain, temperature 0 | ✅ 2.24× | ✅ 1.65× | ✅ 1.02× |
@@ -269,6 +272,10 @@ Sources:
 6. TokenSpeed TP4, 32K: the same server at running cap 4, one 32,768-token prompt with 256 new tokens, a warm
    request and 3 measured requests per start, 2 starts per arm. 812.1 against 258.0 decode tokens/s (first to last
    streamed token). Every start gives 6 exact / 14 fp32 pass.
+   At 128K the same server takes `--max-model-len 135168` (the only change; 65536 cannot hold the prompt) and one
+   131,072-token prompt with 256 new tokens, same requests and starts: 801.3 against 237.5 decode tokens/s.
+   Every start returns the same 256 tokens, with and without speculation, and gives 6 exact / 14 fp32 pass on the
+   twenty prompts.
 7. TokenSpeed TP1: the TP4 recipe on one GPU with the TP4 cost tables (no TP1 tables exist yet), same workloads
    and running caps, 2 starts per arm. 352.5 against 107.9 tokens/s at 1, and 323.4 against 106.9 (3.03×) on eleven
    first turns. 1378.8 against 643.3 at 8 and 2620.4 against 1944.7 at 64. Every start passes the twenty-prompt

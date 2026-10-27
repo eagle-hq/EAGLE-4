@@ -45,6 +45,7 @@ def test_decode_handoff_uses_the_scheduler_stream_contract(monkeypatch, overlap)
         _verified=SimpleNamespace(record=lambda: calls.append("verified")),
         _chain_rounds=ChainRounds(None, None, lambda batch: 10),
         _native_decode=SimpleNamespace(select=lambda batch: False),
+        _stale_kv=None,
     )
     monkeypatch.setattr(module, "spec_stage_span", lambda name: nullcontext())
     monkeypatch.setattr(module, "spin_wait", lambda event: calls.append("wait"))

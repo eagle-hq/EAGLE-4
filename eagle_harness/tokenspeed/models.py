@@ -44,6 +44,7 @@ class CandidateRows(LogitsProcessorOutput):
     """
 
     normed: torch.Tensor | None = None
+    candidate_ids: torch.Tensor | None = None
 
 
 class LlamaForCausalLMEagle4(LlamaForCausalLMEagle3):

@@ -25,7 +25,7 @@ packages include the hooks or that every configuration in the range has been mea
 | GPU and model pair | Configuration-specific qualification | [Support matrix](support-matrix.md) |
 
 The release index carries patched engines with local version labels. Install those exact versions rather
-than assuming that the extras resolve to a compatible stock engine. TokenSpeed's scheduler and kernel
+than assuming that the extras resolve to a compatible stock engine. TokenSpeed's scheduler, kernel and control-plane
 packages must come from the same release source as its runtime package.
 
 The pinned vLLM build includes KV cache group sizing, a decode GEMM used with

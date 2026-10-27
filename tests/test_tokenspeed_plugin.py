@@ -20,15 +20,15 @@ try:
 except (ImportError, RuntimeError) as exc:  # RuntimeError: tokenspeed-kernel on a host without a GPU
     pytest.skip(f"TokenSpeed is not importable here: {exc}", allow_module_level=True)
 
-from tokenspeed.runtime.configs.model_profile import ModelProfile  # noqa: E402
-from tokenspeed.runtime.execution import drafter as drafter_registry  # noqa: E402
-from tokenspeed.runtime.plugins import registry  # noqa: E402
+from tokenspeed.runtime.configs.model_profile import ModelProfile
+from tokenspeed.runtime.execution import drafter as drafter_registry
+from tokenspeed.runtime.plugins import registry
 
-from eagle_harness import compat  # noqa: E402
-from eagle_harness.models.eagle4_config import EAGLE4_ARCH  # noqa: E402
-from eagle_harness.tokenspeed import plugin  # noqa: E402
-from eagle_harness.tokenspeed.config import ALGORITHM_NAME  # noqa: E402
-from eagle_harness.tokenspeed.hooks import hook_problems  # noqa: E402
+from eagle_harness import compat
+from eagle_harness.models.eagle4_config import EAGLE4_ARCH
+from eagle_harness.tokenspeed import plugin
+from eagle_harness.tokenspeed.config import ALGORITHM_NAME
+from eagle_harness.tokenspeed.hooks import hook_problems
 
 HAS_HOOKS = not hook_problems()
 needs_hooks = pytest.mark.skipif(
@@ -76,15 +76,15 @@ def test_draft_profile_is_a_valid_mha_profile():
 def test_the_engine_calls_the_harness_tree_policy():
     # HarnessDrafter defines the public names and aliases the release ones; the installed engine must call one set.
     from tokenspeed.runtime.execution.drafter.eagle import Eagle
-    from tokenspeed.runtime.execution.drafter.tree_round.dynamic import DynamicDrafter
 
     from eagle_harness.tokenspeed.drafter import HarnessDrafter
     from eagle_harness.tokenspeed.hooks import PUBLIC_POLICY, RELEASE_POLICY, tree_policy
+    from eagle_harness.tokenspeed.tree_round.dynamic import DynamicDrafter
 
     names = tree_policy()
     for public, release in zip(PUBLIC_POLICY, RELEASE_POLICY):
         assert getattr(HarnessDrafter, release) is getattr(HarnessDrafter, public)
-    assert hasattr(DynamicDrafter, names.candidates)
+    assert hasattr(DynamicDrafter, "round_candidates")
     for name in names[1:]:
         assert getattr(HarnessDrafter, name) is not getattr(Eagle, name)
 
@@ -94,14 +94,42 @@ def test_a_wrapped_moe_target_is_moe(monkeypatch):
     # Experts under text_config (a multimodal wrapper) count, as in core.models.target_is_moe.
     from types import SimpleNamespace
 
-    from tokenspeed.runtime.execution.drafter.tree_round.dynamic import DynamicDrafter
-
     from eagle_harness.tokenspeed.drafter import HarnessDrafter
+    from eagle_harness.tokenspeed.tree_round.dynamic import DynamicDrafter
 
     monkeypatch.setattr(DynamicDrafter, "wire_target", lambda self, target: None)
     drafter = HarnessDrafter.__new__(HarnessDrafter)
     drafter.wire_target(SimpleNamespace(config=SimpleNamespace(text_config=SimpleNamespace(num_experts=64))))
     assert drafter._target_is_moe is True
+
+
+@needs_hooks
+@pytest.mark.parametrize("tp_size", [1, 4])
+def test_calibration_uses_the_engine_device_process_group(tp_size, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+    from tokenspeed.runtime.distributed import process_group_manager as groups
+
+    from eagle_harness.tokenspeed.config import parse_algorithm_config
+    from eagle_harness.tokenspeed.drafter import HarnessDrafter
+    from eagle_harness.tokenspeed.measurement import MeasurePolicy
+
+    manager = groups.ProcessGroupManager()
+    ranks, process_group = tuple(range(tp_size)), object()
+    manager.register_process_group("nccl", ranks, process_group)
+    monkeypatch.setattr(groups, "process_group_manager", manager)
+    monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: object())
+    drafter = HarnessDrafter.__new__(HarnessDrafter)
+    drafter.device = torch.device("cpu")
+    drafter.config = parse_algorithm_config({"mode": "calibrate", "data_path": str(tmp_path)})
+    drafter.draft_model_runner = SimpleNamespace(mapping=SimpleNamespace(
+        rank=0, attn=SimpleNamespace(tp_size=tp_size, tp_group=ranks)))
+
+    policy = drafter._make_policy(16, 4, 5)
+
+    assert isinstance(policy, MeasurePolicy)
+    assert drafter.measurement.tp_group is (process_group if tp_size > 1 else None)
 
 
 @needs_hooks

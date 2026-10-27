@@ -113,6 +113,7 @@ HOOKS: tuple[Hook, ...] = (
     Hook("sglang.srt.arg_groups.fields.spec:Spec.speculative_algorithm_config", (), FIELD),
     # H7 per-width verify graphs, H10 GDN / Mamba2 verify extensions.
     Hook(f"{_ALGO}.create_decode_graph_variants", ("info",), OVERRIDE, _HARNESS_ALGO),
+    Hook(f"{_ALGO}.max_verify_batch_size", (), OVERRIDE, _HARNESS_ALGO, optional=True),
     Hook(f"{_GRAPH_RUNNER_INFO}.is_draft_worker", (), FIELD),
     Hook(f"{_GRAPH_RUNNER_INFO}.device", (), FIELD),
     Hook(f"{_ALGO}.create_linear_attn_verify_extension", ("state",), OVERRIDE, _HARNESS_ALGO),

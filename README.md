@@ -88,7 +88,7 @@ Or install with pip, in Python 3.12. Pip installs also need the [CUDA toolkit an
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install "eagle-harness[sglang]" "sglang==0.5.23.dev252+eagle.5" \
+pip install "eagle-harness[sglang]" "sglang==0.5.23.dev252+eagle.9" \
   --extra-index-url https://eagle-hq.github.io/EAGLE-4/whl/cu130/ \
   --extra-index-url https://download.pytorch.org/whl/cu130 \
   --extra-index-url https://pypi.nvidia.com
@@ -106,6 +106,10 @@ When the server logs `The server is fired up and ready to roll!`, send a request
 curl http://localhost:30000/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model": "Qwen/Qwen3.8-27B", "messages": [{"role": "user", "content": "Explain how a hash table works."}], "max_tokens": 256}'
 ```
+
+The first requests after a start compile kernels and measure live costs, so they run slower. Send a few requests
+before you measure speed, and compare against the same command without the `--speculative-*` flags
+([benchmarking](docs/faq.md#how-do-i-benchmark-eagle-4)).
 
 For vLLM, TokenSpeed and AMD MI355X, follow the [engine guides](#more).
 

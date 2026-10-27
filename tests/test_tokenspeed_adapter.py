@@ -53,9 +53,29 @@ def test_serve_uses_device_policy_with_calibration():
     assert config.mode is Mode.SERVE and config.cost_dir == "/calibration/cost"
 
 
-def test_unsupported_cost_model_modes_are_refused():
-    with pytest.raises(NotImplementedError, match="static and serve"):
-        parse_algorithm_config({"mode": "calibrate", "data_path": "/nonexistent"})
+@pytest.mark.parametrize("sampled", [False, True])
+def test_sampled_proposals_are_explicit_harness_configuration(sampled):
+    config = parse_algorithm_config({"mode": "serve", "data_path": "/calibration", "sampled_proposals": sampled})
+    assert config.sampled_proposals is sampled
+    assert not parse_algorithm_config({"mode": "static"}).sampled_proposals
+
+
+@pytest.mark.parametrize("value", [None, 1, "true"])
+def test_sampled_proposals_rejects_non_boolean_values(value):
+    with pytest.raises(ValueError, match="sampled_proposals must be a boolean"):
+        parse_algorithm_config({"mode": "serve", "data_path": "/calibration", "sampled_proposals": value})
+
+
+@pytest.mark.parametrize("mode", ["static", "calibrate"])
+def test_sampled_proposals_requires_serve_mode(mode):
+    with pytest.raises(ValueError, match="sampled_proposals requires serve mode"):
+        parse_algorithm_config({"mode": mode, "data_path": "/calibration", "sampled_proposals": True})
+
+
+def test_calibrate_mode_needs_an_output_directory():
+    assert parse_algorithm_config({"mode": "calibrate", "data_path": "/nonexistent"}).mode is Mode.CALIBRATE
+    with pytest.raises(ValueError, match="data_path"):
+        parse_algorithm_config({"mode": "calibrate"})
 
 
 @pytest.mark.parametrize(
@@ -197,8 +217,8 @@ def test_capability_contract_registers_with_every_capability(fake_plugins):
 
 def test_capability_contract_names_a_missing_capability(fake_plugins):
     fake_plugins.PLUGIN_API_VERSION = 3
-    fake_plugins.PLUGIN_CAPABILITIES = hooks.REQUIRED_CAPABILITIES - {"drafter.dynamic_tree"}
-    assert hooks.hook_problems() == ["PLUGIN_CAPABILITIES lacks drafter.dynamic_tree"]
+    fake_plugins.PLUGIN_CAPABILITIES = hooks.REQUIRED_CAPABILITIES - {"drafter.round_protocol"}
+    assert hooks.hook_problems() == ["PLUGIN_CAPABILITIES lacks drafter.round_protocol"]
 
 
 def test_capability_contract_refuses_a_breaking_api_version(fake_plugins):
@@ -225,8 +245,8 @@ def test_release_contract_refuses_an_older_api_version(fake_plugins):
 def test_each_contract_pins_its_own_tree_policy_names():
     capability = {h.path.rpartition(".")[2] for h in hooks.CAPABILITY_HOOKS}
     release = {h.path.rpartition(".")[2] for h in hooks.RELEASE_HOOKS}
-    assert set(hooks.PUBLIC_POLICY) <= capability and not set(hooks.RELEASE_POLICY) & capability
-    assert set(hooks.RELEASE_POLICY) <= release and not set(hooks.PUBLIC_POLICY) & release
+    assert set(hooks.PUBLIC_POLICY[1:]) <= capability and not set(hooks.RELEASE_POLICY) & capability
+    assert set(hooks.RELEASE_POLICY[1:]) <= release and not set(hooks.PUBLIC_POLICY) & release
 
 
 def test_the_drafter_aliases_every_release_name_to_its_public_policy():

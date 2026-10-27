@@ -30,6 +30,7 @@ EAGLE preparation, which allocates them in chunks.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -42,7 +43,7 @@ from sglang.srt.speculative.spec_registry import CustomSpecAlgo
 from eagle_harness.core.config import HarnessConfig, Mode, config_to_dict, parse_harness_config
 from eagle_harness.core.cost_profiles import packaged_cost_profile
 from eagle_harness.core.gemm_solutions import AITER_GEMM_TABLE, AITER_GEMM_TABLE_ENV, serve_bf16_gemms_through_torch
-from eagle_harness.core.limits import ComputeIntensity, check_shape, req_to_token_span
+from eagle_harness.core.limits import ComputeIntensity, check_shape, max_batch_size, req_to_token_span
 from eagle_harness.kernels import arch
 
 if TYPE_CHECKING:
@@ -87,6 +88,20 @@ def _check_rocm_environment(server_args: "ServerArgs") -> None:
         )
 
 
+def default_batch_limits(config: HarnessConfig, native_route: bool) -> tuple[int, Optional[int]]:
+    """``(max_running_requests, max_verify_batch_size)`` of a server launched without ``--max-running-requests``.
+
+    Speculation verifies at most the memory-conservative default (``max_verify_batch_size``, else 32 for a tree and
+    48 for a chain). Where larger batches can decode natively (``native_route``), the server admits up to the tree or
+    chain batch limit and the engine lowers that to what its memory holds, as without speculation; otherwise the
+    verify limit is also the admission limit.
+    """
+    verify_rows = config.max_verify_batch_size or (48 if config.intensity is ComputeIntensity.CHAIN else 32)
+    if native_route:
+        return max_batch_size(config.intensity), verify_rows
+    return verify_rows, config.max_verify_batch_size
+
+
 def harness_config() -> HarnessConfig:
     """The harness config of this process (``--speculative-algorithm-config``)."""
     return parse_harness_config(get_spec().speculative_algorithm_config)
@@ -123,6 +138,11 @@ class EagleHarnessSpecAlgo(CustomSpecAlgo):
         return False
 
     # ---- H7: per-width target-verify graphs
+
+    def max_verify_batch_size(self) -> Optional[int]:
+        """The largest batch the harness verifies (``max_verify_batch_size``); it decodes larger batches natively,
+        so a hybrid target keeps verify states for that many requests only."""
+        return self.config.max_verify_batch_size
     def create_decode_graph_variants(self, info: "DecodeGraphRunnerInfo") -> Optional["VerifyWidthGraphs"]:
         """H7: one target-verify graph per verify width (and per tree width the greedy graph of a
         batch-size-1 round) on the target runner, kept as :attr:`target_verify_graphs`."""
@@ -147,7 +167,11 @@ class EagleHarnessSpecAlgo(CustomSpecAlgo):
             and (self.config.mode is Mode.CALIBRATE or any(0 in row for row in (rounds or {}).values()))
         ) or ((served_chain(self.config, topk) or served_tree(self.config, topk)) and native_decode_available())
         self.target_verify_graphs = VerifyWidthGraphs(
-            self.config.intensity, max_width, TreeTailMask(info.device), plain_decode=plain
+            self.config.intensity,
+            max_width,
+            TreeTailMask(info.device),
+            plain_decode=plain,
+            max_verify_bs=self.config.max_verify_batch_size,
         )
         return self.target_verify_graphs
 
@@ -232,8 +256,19 @@ class EagleHarnessSpecAlgo(CustomSpecAlgo):
             server_args.enable_mixed_chunk = False
             logger.warning("Mixed chunked prefill is disabled: EAGLE_HARNESS does not take mixed steps.")
         if server_args.max_running_requests is None:
-            # Keep the memory-conservative default separate from the supported batch limit.
-            server_args.max_running_requests = 48 if config.intensity is ComputeIntensity.CHAIN else 32
+            from eagle_harness.sglang.chain_rounds import served_chain, served_tree
+            from eagle_harness.sglang.plain_decode import verify_limit_supported
+
+            topk = server_args.speculative_eagle_topk
+            native_route = (
+                (served_tree(config, topk) or served_chain(config, topk))
+                and server_args.dp_size == 1
+                and verify_limit_supported()
+            )
+            server_args.max_running_requests, verify_rows = default_batch_limits(config, native_route)
+            if verify_rows != config.max_verify_batch_size:
+                config = dataclasses.replace(config, max_verify_batch_size=verify_rows)
+                server_args.speculative_algorithm_config = json.dumps(config_to_dict(config))
         topk = server_args.speculative_eagle_topk
         check_shape(
             config.intensity,

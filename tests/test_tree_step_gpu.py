@@ -105,3 +105,49 @@ def test_rank_and_select_kernels_match_reference(k, depth, bs, count, width):
     index = torch.sort(want_ranked[:, : width - 1], dim=-1).values
     assert torch.equal(got.top_scores_index, index)
     assert torch.equal(got.draft_tokens, torch.gather(tree.tokens[:bs], 1, index))
+
+
+_STEP_AT_FULL_BATCH = """
+import torch
+from eagle_harness.core.draft_tree import DraftTree, TreeShape
+
+k, depth, bs, h = {k}, 4, 32, 256
+tree = DraftTree(TreeShape(k, depth, work_cap=64), bs, h, torch.bfloat16, torch.device("cuda"), max_verify=32)
+tree.stage_root(bs, torch.rand(bs, k, device="cuda").softmax(-1), torch.zeros(bs, k, dtype=torch.int64,
+                device="cuda"), torch.zeros(bs, h, device="cuda", dtype=torch.bfloat16))
+tree.begin(bs)
+tree.set_step_slots(bs, 1, torch.zeros(bs, k, dtype=torch.int64, device="cuda"))
+p = torch.rand(bs * k, k, device="cuda").softmax(-1).sort(-1, descending=True).values
+tree.step(bs, 1, p, torch.zeros(bs * k, k, dtype=torch.int64, device="cuda"),
+          torch.zeros(bs * k, h, device="cuda", dtype=torch.bfloat16))
+torch.cuda.synchronize()
+"""
+
+
+@pytest.mark.parametrize("k", [2, 4, 8])
+def test_tree_step_work_deltas_read_only_their_rows_layer_scores(tmp_path, k):
+    """The step's work-delta merge loaded next_pow2(K + 1) - 1 layer scores per row, past the row's K: the last row
+    of a full batch read past ``layer_top``, an illegal address where that tensor ended its allocation (one GPU,
+    batch size 32, --disable-radix-cache, at startup). compute-sanitizer reports any such read."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    sanitizer = shutil.which("compute-sanitizer") or os.path.join(
+        os.environ.get("CUDA_HOME", "/usr/local/cuda"), "bin", "compute-sanitizer"
+    )
+    if not os.path.exists(sanitizer):
+        pytest.skip("needs compute-sanitizer")
+    script = tmp_path / "step.py"
+    script.write_text(_STEP_AT_FULL_BATCH.format(k=k))
+    run = subprocess.run(
+        [sanitizer, "--tool", "memcheck", "--error-exitcode", "3", sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        timeout=900,
+        check=False,
+        # One cudaMalloc per tensor, so the sanitizer sees each tensor's own bounds.
+        env=dict(os.environ, PYTORCH_NO_CUDA_MEMORY_CACHING="1"),
+    )
+    assert run.returncode == 0, run.stdout[-3000:] + run.stderr[-2000:]

@@ -88,9 +88,10 @@ def wheels(tmp_path, channel):
         else {
             "sglang": "0.5.23.dev252+eagle.4",
             "vllm": "0.32.0rc1.dev283+eagle.4",
-            "tokenspeed": "0.1.1+eagle.4",
-            "tokenspeed-kernel": "0.1.1+eagle.4",
-            "tokenspeed-scheduler": "0.1.1+eagle.4",
+            "tokenspeed": "0.1.1+eagle.8",
+            "tokenspeed-kernel": "0.1.4+eagle.8",
+            "tokenspeed-scheduler": "0.1.42+eagle.8",
+            "tokenspeed-engine": "0.1.0+eagle.8",
         }
     )
     result = []
@@ -257,13 +258,17 @@ def test_manifest_changes_are_refused_without_uploading(tmp_path, release):
     assert not any(args[1] == "upload" for args in calls(log))
 
 
-@pytest.mark.parametrize("case", ["missing-companions", "wrong-channel", "harness", "duplicate", "upstream"])
+@pytest.mark.parametrize("case", [
+    "missing-companions", "missing-control-plane", "wrong-channel", "harness", "duplicate", "upstream",
+])
 def test_invalid_upload_is_rejected_before_contacting_github(tmp_path, release, case):
     _, log = release
     artifacts = wheels(tmp_path, "cu130")
     channel = "cu130"
     if case == "missing-companions":
         artifacts = artifacts[:1]
+    elif case == "missing-control-plane":
+        artifacts = [wheel for wheel in artifacts if not wheel.name.startswith("tokenspeed_engine-")]
     elif case == "wrong-channel":
         channel = "rocm"
     elif case == "duplicate":
