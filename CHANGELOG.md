@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.4 (2026-10-28)
+
+### Bug fixes
+
+* **vllm:** Order the candidate all-gather across caller streams, so collectives issued from different streams during startup and CUDA graph capture run in order on each GPU.
+
+### Builds and installation
+
+* **vllm:** Pin vLLM `0.32.0rc1.dev283+eagle.5`, which orders symmetric-memory all-reduces across caller streams.
+
 ## 0.1.3 (2026-10-27)
 
 

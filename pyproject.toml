@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eagle-harness"
-version = "0.1.3"
+version = "0.1.4"
 description = "EAGLE-Harness: cost-model-driven dynamic-tree speculative decoding (out-of-tree sglang, vLLM and TokenSpeed plugin)"
 readme = "README.md"
 license = "LicenseRef-Eagle-4-Source-Available"
