@@ -36,7 +36,7 @@ Then follow the [SGLang guide](quickstart-sglang.md).
 
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install "eagle-harness[vllm]" "vllm==0.32.0rc1.dev283+eagle.4" \
+pip install "eagle-harness[vllm]" "vllm==0.32.0rc1.dev283+eagle.5" \
   --extra-index-url https://eagle-hq.github.io/EAGLE-4/whl/cu130/ \
   --extra-index-url https://download.pytorch.org/whl/cu130
 ```

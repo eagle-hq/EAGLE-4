@@ -100,6 +100,54 @@ def test_candidate_gather_two_ranks_is_the_rank_major_concat():
     print(sorted(results.get() for _ in range(2)))
 
 
+def _two_stream_gather(rank: int, world: int, port: int, results) -> None:
+    """Gathers issued from two caller streams in turn while one rank lags at a time (vLLM's startup: warm-up, then a
+    new stream per graph capture). Each caller copies its result on its own stream before the next gather, as the
+    draft does; every copy must hold that step's rows."""
+    import time
+
+    import torch.distributed as dist
+
+    from eagle_harness.vllm.candidate_gather import CandidateGather
+
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=world)
+    try:
+        group = SimpleNamespace(world_size=world, device_group=dist.group.WORLD, all_gather=None)
+        gather = CandidateGather(group, max_rows=64)
+        streams = [torch.cuda.Stream() for _ in range(2)]
+        copies, bad = [], 0
+        for step in range(400):
+            if rank == step % world and step % 7 == 0:
+                time.sleep(0.02)
+            with torch.cuda.stream(streams[step % 2]):
+                x = torch.full((16, 24), 1000 * step + rank, dtype=torch.int64, device="cuda")
+                copies.append((step, gather(x).clone()))
+            if step % 50 == 49:
+                torch.cuda.synchronize()
+                for s, got in copies:
+                    want = torch.arange(world, device="cuda").repeat_interleave(16)[:, None] + 1000 * s
+                    bad += not torch.equal(got, want.expand(-1, 24))
+                copies.clear()
+        results.put((rank, "multicast" if gather.out is not None else "fallback", bad))
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs two GPUs")
+def test_candidate_gather_from_two_streams_keeps_every_result():
+    """Two streams, lagging ranks: no gather returns or keeps another step's rows, and no rank hangs."""
+    import torch.multiprocessing as mp
+
+    world = min(torch.cuda.device_count(), 8)
+    ctx = mp.get_context("spawn")
+    results = ctx.Queue()
+    mp.start_processes(_two_stream_gather, args=(world, 29547, results), nprocs=world, start_method="spawn")
+    got = sorted(results.get() for _ in range(world))
+    print(got)
+    assert all(bad == 0 for _, _, bad in got), got
+
+
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="needs a GPU")
 def test_candidate_gather_single_rank_is_the_input():
     """One rank: the multicast path (when the host has it) returns the input itself."""

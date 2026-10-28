@@ -51,7 +51,7 @@ HOSTS = (
     Host(
         "vllm",
         SpecifierSet(">=0.32.0rc1.dev283,!=0.32.0"),  # = the `vllm` extra in pyproject.toml
-        "vLLM 0.32.0rc1.dev283+eagle.4 = main 074c83a09a + eagle-harness hooks and fixes",
+        "vLLM 0.32.0rc1.dev283+eagle.5 = main 074c83a09a + eagle-harness hooks and fixes",
         "eagle_harness.vllm.adapter:missing_hooks",
     ),
     Host(
