@@ -26,6 +26,7 @@ decoding; the draft extend still runs, so the draft stays current).
 
 from __future__ import annotations
 
+from collections import Counter
 import copy
 from dataclasses import dataclass
 import logging
@@ -58,6 +59,9 @@ logger = logging.getLogger(__name__)
 # rewritten every 16th refresh and when a bucket's seed sweep completes.
 LIVE_REFRESH_ROUNDS = 64
 LIVE_SAVE_REFRESHES = 16
+# Rounds a batch bucket priced from the buckets around it serves before it is seeded itself: a bucket the load only
+# passes through (a draining batch) stays interpolated, one it dwells in pays for its own seed sweep.
+LIVE_SEED_AFTER_ROUNDS = LIVE_REFRESH_ROUNDS
 
 
 def spin_wait(event: torch.cuda.Event) -> None:
@@ -94,11 +98,13 @@ class RoundTimer:
 
     def drain(self, *, wait: bool) -> None:
         """Feed the completed spans to the live costs; ``wait`` blocks for the rest (seed rounds, so every
-        TP rank records the same rounds and their cells agree)."""
+        TP rank records the same rounds and their cells agree). A span of a bucket that is not ready yet is always
+        waited for: which buckets are ready decides which ones are priced from their neighbours, so it must
+        change on the same round on every rank."""
         left = []
         for span in self._pending:
             start, end, bucket, width, context, count = span
-            if wait:
+            if wait or not self.live.ready(bucket):
                 end.synchronize()
             elif not end.query():
                 left.append(span)
@@ -233,6 +239,8 @@ class DynamicDrafter:
         self._save_cells = save_cells
         self._rounds = 0
         self._seeding: Optional[Tuple[int, int]] = None  # (bucket, context) of a seed round's draft steps
+        self._interpolated = False  # the last round's bucket was priced from the buckets around it
+        self._visits: Counter = Counter()  # rounds served per batch bucket
         self._unpriced: set = set()  # buckets whose live costs the cost model rejects (it keeps the fixed shape)
         self._trivial = build_trivial_input
         self._target_worker = target_worker
@@ -247,6 +255,7 @@ class DynamicDrafter:
         self._verify_scores = _HostCopy(need + 1)
         self._have_lagged = False
         self._pending: Optional[Prelaunch] = None
+        self._drafted_row: Optional[torch.Tensor] = None  # batch row of each request slot in a prelaunched draft
         self._bonus: Optional[torch.Tensor] = None
         self._slot_offsets = torch.arange(max(widths(1)), dtype=torch.int64, device=device)
         runner = target_worker.model_runner
@@ -267,6 +276,33 @@ class DynamicDrafter:
         self._sampled_depth = tree.shape.max_depth
 
     # ----------------------------------------------------------------- policy
+    def warm_up(self, batch_sizes: Sequence[int]) -> None:
+        """Compile, before serving, the round tail's Triton kernels at every shape a round can take: the node
+        ranking at each tree depth, the verify selection and the batch-size-1 tail-mask words at each verify width
+        of ``batch_sizes``. Their shapes are compile-time constants, so a first use inside a served round compiles
+        there (hundreds of milliseconds on a cold kernel cache) and stalls every request of the batch."""
+        tree = self.tree
+        if not tree.scores.is_cuda:
+            return
+
+        widths = sorted({w for bs in batch_sizes for w in self._widths(bs)})
+        widest = max(widths)
+        for depth in range(1, tree.shape.max_depth + 1):
+            count = min(tree.shape.num_nodes(depth), widest - 1)
+            ranked, _ = tree.rank(1, depth, count)
+            for width in widths:
+                if 1 < width <= count + 1:
+                    tree.select(1, min(depth, width - 1), ranked, width)
+        graphs = self._algorithm.target_verify_graphs
+        if graphs is not None and graphs.tail_mask is not None:
+            from eagle_harness.kernels.verify_prep import MAX_TAIL_WIDTH, tree_tail_words
+
+            committed = torch.zeros(1, dtype=torch.int64, device=tree.scores.device)  # the staged seq_lens' dtype
+            for width in self._widths(1):
+                if 1 < width <= MAX_TAIL_WIDTH:
+                    mask = torch.zeros(width * width, dtype=torch.bool, device=tree.scores.device)
+                    tree_tail_words(mask, committed, torch.empty(width, dtype=torch.int64, device=mask.device), width)
+
     @property
     def seeding(self) -> bool:
         """Whether the last drafted round was forced to seed the live costs of its batch bucket."""
@@ -284,10 +320,24 @@ class DynamicDrafter:
         if self.live is None:
             return self.cost
         bucket = self._bucket(bs)
-        if self.live.ready(bucket) and bucket in self.cost.tables and bucket not in self._unpriced:
+        if not self._seeds(bucket) and bucket in self.cost.tables and bucket not in self._unpriced:
             return self.cost
         self.fixed.force_width = self.live.seed_width(bucket)
         return self.fixed
+
+    def _seeds(self, bucket: int) -> bool:
+        """Whether a round at ``bucket`` belongs to its seed sweep: the bucket is not ready, and either no ready
+        buckets around it price it (:meth:`LiveCosts.priced`) or the load has dwelt there long enough
+        (:data:`LIVE_SEED_AFTER_ROUNDS`) to pay for measuring it."""
+        return not self.live.ready(bucket) and (
+            not self.live.priced(bucket) or self._visits[bucket] > LIVE_SEED_AFTER_ROUNDS
+        )
+
+    @property
+    def round_timer(self) -> Optional[RoundTimer]:
+        """The timer of this round's verify span; None for a round priced from neighbouring buckets (only ready
+        buckets and seed sweeps record, so the ready buckets change on the same round on every TP rank)."""
+        return None if self._interpolated else self.timer
 
     def _begin_round(self, batch: "ScheduleBatch") -> None:
         """Read the last rounds' timings; refresh (and share) the live tables on the refresh rounds."""
@@ -295,23 +345,34 @@ class DynamicDrafter:
             return
         bs = len(batch.reqs)
         bucket = self._bucket(bs)
-        seeding = not self.live.ready(bucket)
+        self._visits[bucket] += 1
+        seeding = self._seeds(bucket)
         self.timer.drain(wait=seeding)
         self._rounds += 1
         ready = self.live.ready(bucket)
+        interpolated = not ready and not self._seeds(bucket)
         # Table refreshes happen on the same rounds on every TP rank (round count and seed state agree), from
         # rank 0's cells, so the ranks' decisions agree.
-        if (ready and (seeding or self._rounds == 1)) or self._rounds % LIVE_REFRESH_ROUNDS == 0:
+        newly_priced = interpolated and bucket not in self.cost.tables
+        if (ready and (seeding or self._rounds == 1)) or newly_priced or self._rounds % LIVE_REFRESH_ROUNDS == 0:
             if self._sync_cells is not None:
                 self.live.cells = self._sync_cells(self.live.cells)
-            self.cost.set_tables(self.live.tables())
+            # Every bucket served so far keeps its table, interpolated ones included (they have no cells).
+            self.cost.set_tables(self.live.tables(also=tuple(self._visits)))
             for measured_bucket in self.cost.tables:
                 self._check_priced(measured_bucket)
             if self._save_cells is not None and (seeding or self._rounds % (LIVE_REFRESH_ROUNDS * LIVE_SAVE_REFRESHES) == 0):
                 self._save_cells()
-            if seeding:
+            if seeding and ready:
                 logger.info("eagle-harness: live costs seeded for batch bucket %d: %s", bucket, self._table_summary(bucket))
-        self._seeding = None if ready else (bucket, self.average_context(batch))
+            elif newly_priced:
+                logger.info(
+                    "eagle-harness: live costs of batch bucket %d priced from the buckets around it: %s",
+                    bucket,
+                    self._table_summary(bucket),
+                )
+        self._interpolated = interpolated
+        self._seeding = None if ready or interpolated else (bucket, self.average_context(batch))
 
     def _check_priced(self, bucket: int) -> None:
         """Keep the fixed shape at a bucket whose measured costs the cost model refuses (its ratio sanity checks)."""
@@ -334,7 +395,9 @@ class DynamicDrafter:
         )
 
     def _sample_steps(self) -> bool:
-        return self.live is not None and (self._seeding is not None or self._rounds % LIVE_REFRESH_ROUNDS == 0)
+        return self.live is not None and (
+            self._seeding is not None or (self._rounds % LIVE_REFRESH_ROUNDS == 0 and not self._interpolated)
+        )
 
     def _timed_steps(self, bs: int, run: Callable[[], int], context: int = 0) -> int:
         """Time seed steps and one queued draft prefix per refresh period, on its executing stream."""
@@ -397,6 +460,23 @@ class DynamicDrafter:
             torch.cuda.current_stream().wait_stream(pending.stream)
         return pending
 
+    def _keep_drafted(self, pending: Prelaunch, batch: "ScheduleBatch") -> bool:
+        """Whether ``pending`` drafted ``batch``: the batch it was queued for, or that batch less the requests the
+        scheduler dropped since (finished ones), whose rows the tree and the staged batch then keep. At large batch
+        sizes some request finishes nearly every round, so without the second case each round drafted twice."""
+        key = batch_key(batch)
+        if pending.key == key:
+            return True
+        if not set(key) <= set(pending.key):
+            return False
+        drafted = len(pending.key)  # the staged batch is still the one the prelaunch drafted
+        if self._drafted_row is None:
+            self._drafted_row = torch.zeros(self.steps.req_to_token.shape[0], dtype=torch.int64, device=self._device)
+        self._drafted_row[self.steps.req_pool_indices[:drafted]] = torch.arange(drafted, device=self._device)
+        self.tree.keep_rows(self._drafted_row[batch.req_pool_indices])
+        self.steps.load_batch(len(key), batch.seq_lens, batch.req_pool_indices)
+        return True
+
     # ------------------------------------------------------------------ round
     def draft(self, batch: "ScheduleBatch") -> "EagleVerifyInput":
         """Grow this round's tree and return the verify input (a trivial one when no tree is drafted)."""
@@ -409,7 +489,7 @@ class DynamicDrafter:
         self._begin_round(batch)
         policy = self.policy(bs)
         context = self.average_context(batch)
-        if pending is not None and pending.key == batch_key(batch):
+        if pending is not None and self._keep_drafted(pending, batch):
             depth = pending.next_depth
         else:
             self.steps.load_batch(bs, batch.seq_lens, batch.req_pool_indices)
@@ -464,6 +544,7 @@ class DynamicDrafter:
             width = pending.width
         else:
             width = self._chain_width(bs)
+        if pending is None or pending.width != width or not self._keep_drafted(pending, batch):
             # Staged at every width: the draft extend after the verify reads the batch from the steps.
             self.steps.load_batch(bs, batch.seq_lens, batch.req_pool_indices)
             if width > 1:

@@ -267,3 +267,49 @@ def test_offline_tables_are_validated_and_keyed_at_load(tmp_path):
     with pytest.raises(ValueError, match="another setup"):
         load_cost_tables(str(tmp_path / "cost"), CostKey("H100", 4, "qwen:abc", "eagle4:def", "sglang 0.5.23", "torch.bfloat16"))
     assert load_cost_tables(str(tmp_path / "missing"), KEY) == {}
+
+
+def _bucketed(**kw) -> LiveCosts:
+    """Widths per bucket as captured: width 4 only from batch size 5 up."""
+    return LiveCosts(widths=lambda bs: [16, 8, 1] if bs <= 4 else [16, 8, 4, 1], key=KEY, seed_samples=2, **kw)
+
+
+def test_a_bucket_between_ready_buckets_is_priced_linearly_in_the_batch_size():
+    live = _bucketed()
+    _seed(live, 1, {1: 4000.0, 8: 4500.0, 16: 5000.0}, draft_us=150.0)
+    assert not live.priced(4)  # one ready bucket: nothing on the other side
+    _seed(live, 8, {1: 4700.0, 4: 4900.0, 8: 5400.0, 16: 6400.0}, draft_us=220.0)
+    assert live.ready(1) and live.ready(8) and not live.ready(4)
+    assert live.priced(4) and live.priced(1) and not live.priced(12)  # never extrapolated
+    assert live.verify_us(4, 1) == pytest.approx(4000.0 + 3 / 7 * 700.0)
+    assert 4 not in live.tables() and 12 not in live.tables(also=(12,))
+    table = live.tables(also=(4, 6))[4]
+    assert table.intervals[0].target.value == pytest.approx((4300.0, 4885.714, 5600.0), rel=1e-6)
+    assert table.intervals[0].draft.value == pytest.approx((180.0,))
+    # Width 4 (bucket 6) is linear between bucket 1's widths 1 and 8 before it is linear in the batch size.
+    below = 4000.0 + 3 / 7 * 500.0
+    width4 = live.tables(also=(6,))[6].intervals[0].target.value[1]
+    assert width4 == pytest.approx(below + 5 / 7 * (4900.0 - below))
+    assert live.verify_us(6, 4) == pytest.approx(width4)
+
+
+def test_an_interpolated_bucket_keeps_its_own_fully_sampled_cells():
+    live = _bucketed()
+    _seed(live, 1, {1: 4000.0, 8: 4500.0, 16: 5000.0})
+    _seed(live, 8, {1: 4700.0, 4: 4900.0, 8: 5400.0, 16: 6400.0})
+    live.record(4, 16, 500, 5200.0)
+    live.record(4, 16, 500, 5100.0)
+    assert not live.ready(4)
+    target = live.tables(also=(4,))[4].intervals[0].target.value
+    assert target[2] == 5100.0 and target[0] == pytest.approx(4000.0 + 3 / 7 * 700.0)
+
+
+def test_readiness_follows_a_replaced_cells_dict():
+    """A TP sync replaces the cells with rank 0's: the sample counts behind ready() are rebuilt from them."""
+    live, seeded = _bucketed(), _bucketed()
+    _seed(seeded, 1, {1: 4000.0, 8: 4500.0, 16: 5000.0})
+    assert not live.ready(1)
+    live.cells = seeded.cells
+    assert live.ready(1) and live.seed_width(1) is None
+    live.cells = {}
+    assert not live.ready(1) and live.seed_width(1) == 1

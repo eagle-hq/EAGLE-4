@@ -122,3 +122,64 @@ def test_stores_follow_the_request_slot_map():
     torch.testing.assert_close(q[req, 1], reference.probs, rtol=1e-6, atol=1e-7)
     torch.testing.assert_close(positions[req, 3:5], reference.positions, rtol=0, atol=0)
     assert q[[0, 1, 3, 4, 6, 7]].abs().sum() == 0 and q[:, [0, 2]].abs().sum() == 0
+
+
+# (1/temperature, top-k, top-p, min-p): coding, narrow top-k, min-p, top-1, and narrow top-p.
+FILTER_CASES = [(1.0, 20, 0.95, 0.0), (2.0, 3, 1.0, 0.0), (1.0, 1 << 30, 1.0, 0.1),
+                (1.0, 1, 1.0, 0.0), (0.5, 1 << 30, 0.3, 0.0)]
+
+
+@pytest.mark.parametrize("inv_t, top_k, top_p, min_p", FILTER_CASES)
+def test_filtered_draw_matches_reference_on_filtered_logits(inv_t, top_k, top_p, min_p):
+    from eagle_harness.core.sampled_tree import filter_proposal_logits
+    from eagle_harness.kernels.sampled_draw import sample_children
+
+    bs, nc, k = 4, 128, 4
+    gen = torch.Generator().manual_seed(17 + top_k)
+    logits = torch.randn(bs, nc, generator=gen) * 3
+    token_ids = torch.stack([torch.randperm(5000, generator=gen)[:nc] for _ in range(bs)])
+    uniforms = torch.rand(bs, nc, generator=gen)
+    req = torch.tensor([6, 1, 3, 0])
+    filters = torch.tensor([1.0, float(1 << 30), 1.0, 0.0]).repeat(8, 1)
+    filters[req] = torch.tensor([inv_t, float(top_k), top_p, min_p])
+    rows = torch.ones(bs)
+    filtered = filter_proposal_logits(logits, rows / inv_t, rows * top_k, rows * top_p, rows * min_p)
+    kept = torch.isfinite(filtered).sum(dim=1)
+    reference = draw_children(filtered, token_ids, k, uniforms=uniforms)
+    q, ids, positions = _stores(8, 1, nc, k)
+    scores, tokens = sample_children(
+        logits.to(DEV), token_ids.to(DEV), k, seed=1, launch=0, counter=torch.ones(1, dtype=torch.int32, device=DEV),
+        q=q, q_ids=ids, positions=positions, slot=0, start=0, rows_per_req=1, uniforms=uniforms.to(DEV),
+        req_index=req.to(DEV), filters=filters.to(DEV),
+    )
+    if not INTERPRET:
+        torch.cuda.synchronize()
+    q, positions, scores, tokens = q.cpu(), positions.cpu(), scores.cpu(), tokens.cpu()
+    torch.testing.assert_close(q[req, 0], reference.probs, rtol=1e-5, atol=1e-7)
+    assert ((q[req, 0] > 0) == torch.isfinite(filtered)).all()
+    torch.testing.assert_close(scores, reference.scores, rtol=1e-5, atol=1e-7)
+    for b in range(bs):
+        live = min(k, int(kept[b]))  # draws past the kept support are inert (q = 0) and need not match
+        torch.testing.assert_close(positions[req[b], :live], reference.positions[b, :live], rtol=0, atol=0)
+        torch.testing.assert_close(tokens[b, :live], reference.tokens[b, :live], rtol=0, atol=0)
+        assert positions[req[b]].unique().numel() == k  # inert draws stay distinct candidates
+        assert (q[req[b], 0].gather(0, positions[req[b], live:]) == 0).all()
+
+
+def test_identity_filters_draw_bitwise_like_no_filters():
+    from eagle_harness.kernels.sampled_draw import sample_children
+
+    nc, k = 128, 4
+    gen = torch.Generator().manual_seed(5)
+    logits = (torch.randn(3, nc, generator=gen) * 2).to(DEV)
+    token_ids = torch.arange(nc).expand(3, -1).contiguous().to(DEV)
+    identity = torch.tensor([1.0, float(1 << 30), 1.0, 0.0]).repeat(3, 1).to(DEV)
+    out = []
+    for filters in (None, identity):
+        q, ids, positions = _stores(3, 1, nc, k)
+        scores, tokens = sample_children(logits, token_ids, k, seed=4, launch=2,
+                                         counter=torch.full((1,), 7, dtype=torch.int32, device=DEV), q=q, q_ids=ids,
+                                         positions=positions, slot=0, start=0, rows_per_req=1, filters=filters)
+        out.append((q.cpu(), positions.cpu(), scores.cpu(), tokens.cpu()))
+    for a, b in zip(*out):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)

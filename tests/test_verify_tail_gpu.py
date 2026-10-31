@@ -12,6 +12,7 @@ import torch
 pytest.importorskip("sglang")
 
 from eagle_harness.core.draft_tree import DraftTree, TreeShape  # noqa: E402
+from eagle_harness.sglang import verify_tail  # noqa: E402
 from eagle_harness.sglang.verify_tail import VerifyTail  # noqa: E402
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
@@ -45,13 +46,14 @@ def _build(bs, selection, steps, width):
 
 
 @pytest.mark.parametrize("bs,depth,width", [(1, 6, 16), (1, 4, 8), (3, 7, 16)])
-def test_replayed_ranking_and_selection_follow_the_trees_buffers(bs, depth, width):
+def test_replayed_ranking_and_selection_follow_the_trees_buffers(monkeypatch, bs, depth, width):
+    monkeypatch.setattr(verify_tail, "CAPTURE_AFTER", 1)  # each graph: an eager round, a capture, then replays
     tree = _drafted_tree(bs, depth, seed=1)
     tail = VerifyTail(tree, _build)
     count = min(tree.shape.num_nodes(depth), 15)
-    for seed in (1, 2):  # the second round refills the same static buffers with another tree
-        if seed == 2:
-            other = _drafted_tree(bs, depth, seed=2)
+    for seed in (1, 2, 3, 4):  # later rounds refill the same static buffers with another tree
+        if seed > 1:
+            other = _drafted_tree(bs, depth, seed=seed)
             for name in ("scores", "tokens", "parents"):
                 getattr(tree, name).copy_(getattr(other, name))
         ranking = tail.rank(bs, depth, count)

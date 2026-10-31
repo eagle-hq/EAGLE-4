@@ -25,8 +25,9 @@ so only the draft depth adapts per round.
 - Warm the server up first. The first requests after a start compile kernels and seed the live costs. On
   4× B300 at one request (SGLang, eagle-harness 0.1.2, started with `--skip-server-warmup`), the first request
   after a start decoded at 63 to 85 tokens/s in three starts. The same request after warm-up decoded at 910 to
-  915 tokens/s. Send a few requests that look like your workload, or run the workload once, before timing.
-  Restarts reuse the caches under `~/.cache/eagle-harness/costs`.
+  915 tokens/s. Before timing, run one untimed pass of your workload at each concurrency
+  ([what to warm up](#what-should-i-warm-up-before-timing-a-benchmark)). Restarts reuse the caches under
+  `~/.cache/eagle-harness/costs`.
 - Compare against the same engine and flags. Start the server without speculation from the same command minus
   the `--speculative-*` flags. Keep `--mamba-ssm-dtype`, the attention backend, the page size and the CUDA graph
   settings identical, because they change the speed of plain decoding too.
@@ -85,8 +86,9 @@ do not establish distribution equivalence for every model and workload.
   verified as chains using the host rejection sampler, which can accept fewer tokens. This fallback is not a
   claim of token-identical output across different numerical execution shapes.
 - sglang: sampled requests go through sglang's own tree speculative sampling. Two settings need an sglang build with
-  the verify filter fix: min-p, and top-k combined with top-p. Older builds ignore min-p in verify and cut top-p after
-  top-k.
+  the verify filter fix, which the pinned engine has: min-p, and top-k combined with top-p. Older builds ignore min-p
+  in verify and cut top-p after top-k. The temperature-1 sampled tree draws its proposals with the request's top-k,
+  top-p and min-p, applied jointly as sglang's sampler applies them.
   Penalties use sglang's relaxed form (counts of committed tokens only), as in sglang's own EAGLE, so they are not
   exact. Seeds need `--enable-deterministic-inference`.
 
@@ -101,6 +103,36 @@ Requests with images are refused with a reason on sglang.
 NVIDIA from sm_80 (A100) and AMD CDNA2 to CDNA4 through the Triton kernels, with faster native and Gluon kernels on
 newer NVIDIA GPUs. Serving measurements cover B300 and SGLang on MI355X. Other architectures have compilation
 coverage, not serving qualification. See [kernels](kernels.md).
+
+## What should I warm up before timing a benchmark?
+
+Run one untimed pass of your workload at each concurrency you plan to measure, then time a separate pass.
+Use the same prompt and output lengths, sampling settings and server flags for both passes. The first requests
+compile kernels and fill cost caches for the batch shapes the workload exercises. A single request does not
+warm the shapes used by a concurrent workload.
+
+Repeat this warm-up after each server start, including restarts with saved caches. Warm both the EAGLE-4 server
+and its same-engine no-speculation baseline. To isolate the effect of speculation, keep non-speculation settings
+matched, including the attention backend, recurrent-state dtype, page size and CUDA graph settings. Measure at the
+temperature you serve, and report decoding throughput separately from prefill latency or time to first token.
+
+When reproducing a published ratio, use its documented no-speculation configuration and report any differences
+between the servers. For example, the [AMD measurement](quickstart-amd.md#installed-wheel-qualification) uses
+the ordinary overlapping scheduler and twice the Mamba cache cap for its no-speculation control.
+
+The [candidate high-load measurement](support-matrix.md#candidate-high-load), source 1, illustrates why you
+should distinguish a first machine start from a warm restart. It uses SGLang TP4 with Qwen3.8-27B,
+automatic chain widths and a running cap of 512. At concurrency 64, the workload has 128 first turns with up to
+256 new tokens per turn. Each ratio divides EAGLE-4 throughput by the same engine's no-speculation throughput,
+so a higher ratio is better.
+
+| Cache condition at concurrency 64 | Throughput relative to no speculation |
+|---|---|
+| First server start on the machine, compiling kernels during requests | 0.78× |
+| Warm restarts with a saved policy cache, three starts | 1.07× |
+
+These are candidate measurements, not a speed guarantee for another setup. If cold-start performance matters
+to your application, report it separately rather than including it in a warm-throughput average.
 
 ## How do I cite it?
 

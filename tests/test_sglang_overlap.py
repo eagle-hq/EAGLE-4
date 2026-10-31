@@ -35,6 +35,7 @@ def test_decode_handoff_uses_the_scheduler_stream_contract(monkeypatch, overlap)
         last_width=4,
         seeding=False,  # the round served the cost model's tree, not a live-cost seed width
         timer=None,
+        round_timer=None,
         prelaunch=Mock(side_effect=lambda b, **kwargs: (calls.append("prelaunch"), "fence")[1]),
     )
     worker = SimpleNamespace(

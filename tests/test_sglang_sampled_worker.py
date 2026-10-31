@@ -153,3 +153,35 @@ def test_verify_passes_the_tree_sampler_only_for_an_active_sampled_tree(monkeypa
         assert step("target", "coins", "final") == ("verify-input", "target", "coins", "final")
     else:
         assert step is None
+
+
+def _sampled_tree(rows=6):
+    from eagle_harness.sglang.sampled_tree import SampledTree
+
+    shape = SimpleNamespace(max_depth=3, top_k=2, layer_start=lambda depth: 1 + (depth - 1) * 2)
+    tree = SimpleNamespace(shape=shape, tokens=torch.zeros((rows, 9), dtype=torch.int64), max_bs=rows)
+    return SampledTree(tree, 8, 721, rows=rows)
+
+
+def test_prefill_records_each_request_sampling_settings_at_its_slot(monkeypatch):
+    """A prefill stages its requests' sampler settings, so their later proposals follow the target's sampler."""
+    sampled = _sampled_tree()
+    calls = []
+    parent = worker_mod.EagleHarnessWorker.__mro__[1]
+    monkeypatch.setattr(parent, "forward_batch_generation", lambda self, *args, **kwargs: calls.append(args) or "prefilled")
+    worker = worker_mod.EagleHarnessWorker.__new__(worker_mod.EagleHarnessWorker)
+    worker._chain_rounds = SimpleNamespace(interrupt=lambda: None)
+    worker._drafter = SimpleNamespace(cancel_prelaunch=lambda: None)
+    worker._draft_worker = SimpleNamespace(steps=SimpleNamespace(sampled=sampled))
+    sampled.root_valid.fill_(True)
+    info = SimpleNamespace(temperatures=torch.tensor([[0.5], [1.0]]), top_ks=torch.tensor([20, 1 << 30], dtype=torch.int32),
+                           top_ps=torch.tensor([0.95, 1.0]), min_ps=torch.tensor([0.0, 0.1]))
+    batch = SimpleNamespace(forward_mode=SimpleNamespace(is_extend=lambda: True), is_extend_in_batch=True,
+                            req_pool_indices=torch.tensor([3, 0]), sampling_info=info)
+    assert worker.forward_batch_generation(batch) == "prefilled" and calls
+    identity = torch.tensor([1.0, float(1 << 30), 1.0, 0.0])
+    torch.testing.assert_close(sampled.filters[3], torch.tensor([2.0, 20.0, 0.95, 0.0]))
+    torch.testing.assert_close(sampled.filters[0], torch.tensor([1.0, float(1 << 30), 1.0, 0.1]))
+    for slot in (1, 2, 4, 5):
+        torch.testing.assert_close(sampled.filters[slot], identity)
+    assert sampled.root_valid.tolist() == [False, True, True, False, True, True]

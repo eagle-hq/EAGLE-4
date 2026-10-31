@@ -3,6 +3,7 @@
 
 """DynamicDrafter wiring checks that run on CPU (the round itself needs CUDA graphs)."""
 
+import collections
 from types import SimpleNamespace
 
 import pytest
@@ -106,6 +107,7 @@ def _sequenced(tiny: bool, stop: int, policy=None):
     drafter.steps, drafter.tree, drafter.cost = steps, tree, _StopAt(cost, stop)
     drafter.fixed = FixedShapePolicy(ComputeIntensity.HIGH, K, DEPTH, WIDTH)
     drafter.live, drafter.timer, drafter._seeding = None, None, None
+    drafter._interpolated, drafter._visits = False, collections.Counter()
     drafter._deltas_ready, drafter._deltas_slot = _Event(), 0
     drafter._policy = drafter.fixed if policy == "fixed" else drafter.cost
     drafter.policy = lambda bs: drafter._policy
@@ -202,6 +204,7 @@ def _chain_sequenced(stop: int):
     drafter = DynamicDrafter.__new__(DynamicDrafter)
     drafter.steps, drafter.tree, drafter.cost = steps, tree, cost
     drafter.live, drafter.timer, drafter._seeding = None, None, None
+    drafter._interpolated, drafter._visits = False, collections.Counter()
     drafter._deltas_ready, drafter._deltas_slot = _Event(), 0
     drafter.policy = lambda bs: cost
     return drafter, steps, policy
@@ -369,6 +372,53 @@ def test_prelaunched_chain_keeps_the_width_it_was_queued_with():
     assert drafter.tail.built[-1] == (3, 1, 1, 2)
 
 
+class _KeptTree:
+    def __init__(self):
+        self.kept = []
+
+    def keep_rows(self, rows):
+        self.kept.append(rows.tolist())
+
+
+def _prelaunched_chain(width, drafted, plan):
+    """A chain drafter whose last round drafted the requests ``drafted`` (block-table rows) at ``width``."""
+    from eagle_harness.sglang.drafter import Prelaunch
+
+    drafter = _chain_drafter(plan)
+    drafter.tree, drafter._drafted_row = _KeptTree(), None
+    drafter.steps.req_to_token = torch.zeros(8, 4)
+    drafter.steps.req_pool_indices = torch.zeros(8, dtype=torch.int64)
+    drafter.steps.req_pool_indices[: len(drafted)] = torch.tensor(drafted)
+    pending = Prelaunch(tuple(drafted), drafter._queue_chain(len(drafted), width), width, stream=None)
+    drafter._take_pending = lambda: pending
+    return drafter
+
+
+def _requests(rows):
+    batch = _chain_batch(len(rows))
+    batch.req_pool_indices = torch.tensor(rows)
+    batch.reqs = [SimpleNamespace(kv=SimpleNamespace(req_pool_idx=r)) for r in rows]
+    return batch
+
+
+def test_a_batch_that_lost_requests_keeps_their_prelaunched_chain():
+    """Requests 1 and 4 finished after the prelaunch drafted [5, 1, 7, 4]: the round verifies the kept rows' draft
+    (batch positions 0 and 2) instead of drafting the chain again."""
+    drafter = _prelaunched_chain(4, [5, 1, 7, 4], plan=[4])
+    drafter.draft(_requests([5, 7]))
+    assert drafter.steps.ran == [1, 2] and drafter.steps.begun == []  # the prelaunch's steps only
+    assert drafter.tree.kept == [[0, 2]] and drafter.steps.loaded == [2]
+    assert drafter.tail.built == [(2, 3, 3, 4)]
+
+
+@pytest.mark.parametrize("rows, plan", [([5, 9], [4]), ([5, 7], [2])])
+def test_a_new_request_or_width_drafts_the_chain_again(rows, plan):
+    """A request the prelaunch did not draft (9), or a new width for the smaller batch, drafts from the begin."""
+    drafter = _prelaunched_chain(4, [5, 1, 7, 4], plan=plan)
+    drafter.draft(_requests(rows))
+    assert drafter.tree.kept == [] and drafter.steps.begun == [2]
+
+
 @pytest.mark.parametrize("cycles, offset, sampled", [(1, -1, False), (1, 0, True), (1, 1, False), (2, 0, True)])
 def test_live_draft_costs_continue_sampling_after_seeding(cycles, offset, sampled):
     from eagle_harness.core.live_costs import LiveCosts
@@ -442,3 +492,104 @@ def test_average_context_reads_request_lengths_when_the_overlap_scheduler_drops_
     assert DynamicDrafter.average_context(overlap) == 15
     synchronous = SimpleNamespace(reqs=reqs, seq_lens=torch.tensor([10, 21]), seq_lens_cpu=torch.tensor([12, 22]))
     assert DynamicDrafter.average_context(synchronous) == 17
+
+
+def _live_drafter(seeded):
+    """A drafter on the production policy with live costs whose ``seeded`` buckets are ready."""
+    from eagle_harness.core.live_costs import DRAFT_WIDTH, LiveCosts
+
+    drafter, _ = _sequenced(True, stop=0)
+    del drafter.policy
+    drafter.cost = _cost()
+    drafter.live = LiveCosts(widths=lambda bs: [1, 8, 16], seed_samples=1)
+    for bucket in seeded:
+        for width, us in ((1, 4000.0 + 50 * bucket), (8, 4300.0 + 80 * bucket), (16, 4600.0 + 100 * bucket)):
+            drafter.live.record(bucket, width, 100, us)
+        drafter.live.record(bucket, DRAFT_WIDTH, 100, 170.0)
+    drafter.cost.set_tables(drafter.live.tables())
+    drafter._bucket = lambda bs: bs
+    drafter.timer = SimpleNamespace(drain=lambda **kw: None)
+    drafter._sync_cells = drafter._save_cells = None
+    drafter._unpriced = set()
+    drafter._rounds = 1
+    return drafter
+
+
+def test_a_bucket_between_seeded_buckets_serves_the_cost_model_without_a_seed_sweep():
+    """A draining batch passes through sizes the load never dwells in: they are priced from the buckets around
+    them, their rounds are not timed (so readiness changes only on seed rounds, alike on every TP rank), and only a
+    bucket the load stays in for LIVE_SEED_AFTER_ROUNDS rounds is seeded itself."""
+    from eagle_harness.sglang.drafter import LIVE_SEED_AFTER_ROUNDS
+
+    drafter = _live_drafter(seeded=(1, 8))
+    batch = SimpleNamespace(reqs=[None] * 4, seq_lens_cpu=torch.tensor([100] * 4))
+    drafter._begin_round(batch)
+    assert 4 in drafter.cost.tables and drafter.policy(4) is drafter.cost
+    assert drafter._seeding is None and drafter.round_timer is None
+    tables = drafter.cost.tables
+    drafter._begin_round(SimpleNamespace(reqs=[None] * 6, seq_lens_cpu=torch.tensor([100] * 6)))
+    assert drafter.cost.tables is not tables and {4, 6} <= set(drafter.cost.tables)  # 6 joins, 4 stays
+    tables = drafter.cost.tables
+    drafter._begin_round(batch)
+    assert drafter.cost.tables is tables  # bucket 4 is still tabled: no refresh (and no TP broadcast)
+    for _ in range(LIVE_SEED_AFTER_ROUNDS):
+        drafter._begin_round(batch)
+    assert drafter.policy(4) is drafter.fixed and drafter.fixed.force_width == 1
+    assert drafter._seeding == (4, 100) and drafter.round_timer is drafter.timer
+
+
+def test_a_bucket_outside_the_seeded_ones_is_seeded_on_its_first_round():
+    drafter = _live_drafter(seeded=(1, 8))
+    drafter._begin_round(SimpleNamespace(reqs=[None] * 12, seq_lens_cpu=torch.tensor([100] * 12)))
+    assert 12 not in drafter.cost.tables and drafter.policy(12) is drafter.fixed
+    assert drafter._seeding == (12, 100) and drafter.round_timer is drafter.timer
+
+
+def test_the_round_timer_waits_for_spans_of_unready_buckets():
+    """Seed samples land on the same round on every TP rank: readiness decides which buckets are interpolated."""
+    from eagle_harness.core.live_costs import DRAFT_WIDTH, LiveCosts
+    from eagle_harness.sglang.drafter import RoundTimer
+
+    class Pending:
+        waited = False
+
+        def query(self):
+            return False
+
+        def synchronize(self):
+            self.waited = True
+
+        def elapsed_time(self, end):
+            return 4.0
+
+    live = LiveCosts(widths=lambda bs: [1], seed_samples=1)
+    live.record(1, 1, 100, 4000.0)
+    live.record(1, DRAFT_WIDTH, 100, 170.0)
+    timer = RoundTimer(live)
+    ready_end, unready_end = Pending(), Pending()
+    timer._pending = [(Pending(), ready_end, 1, 1, 100, 1), (Pending(), unready_end, 2, 1, 100, 1)]
+    timer.drain(wait=False)
+    assert not ready_end.waited and unready_end.waited
+    assert live.cells[(2, 1, 0)].samples == 1 and len(timer._pending) == 1
+
+
+def test_warm_up_runs_the_tail_kernels_at_every_depth_and_verify_width():
+    """Every ranking (one per depth) and selection (one per verify width) shape compiles before serving."""
+    drafter, _ = _sequenced(True, stop=0)
+    calls = []
+    shape = TreeShape(K, DEPTH)
+    drafter.tree = SimpleNamespace(
+        scores=SimpleNamespace(is_cuda=True),
+        shape=shape,
+        rank=lambda bs, depth, count: (calls.append(("rank", depth, count)) or "ranked", None),
+        select=lambda bs, depth, ranked, width: calls.append(("select", depth, width)),
+    )
+    drafter._widths = lambda bs: [16, 8, 1] if bs <= 8 else [16, 8, 4, 1]
+    drafter._algorithm = SimpleNamespace(target_verify_graphs=None)
+    drafter.warm_up([1, 8, 32])
+    ranks = [c for c in calls if c[0] == "rank"]
+    assert [c[1] for c in ranks] == list(range(1, DEPTH + 1))
+    assert all(count == min(shape.num_nodes(depth), 15) for _, depth, count in ranks)
+    assert {c[2] for c in calls if c[0] == "select"} == {4, 8, 16}
+    assert ("select", 1, 4) in calls and ("select", 3, 4) in calls  # a depth-1 tree verifies at most K + 1 tokens
+    assert not any(c[0] == "select" and c[2] > shape.num_nodes(c[1]) + 1 for c in calls)

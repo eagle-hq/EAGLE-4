@@ -40,6 +40,17 @@ def caller_stream(request):
     stream.synchronize()
 
 
+def _prelaunch_drafter(chain_width):
+    drafter = DynamicDrafter.__new__(DynamicDrafter)
+    drafter._device = torch.device("cuda")
+    drafter.live = None
+    drafter._prelaunch_stream = None
+    drafter._pending = None
+    drafter._chain_width = (lambda bs: chain_width) if chain_width is not None else None
+    drafter.policy = lambda bs: None
+    return drafter
+
+
 @pytest.mark.parametrize("consumer", ["filter", "merge_into", "merge_from"])
 def test_prelaunch_roots_are_ready_for_scheduler_compaction(consumer, caller_stream, chain_width):
     pending = EagleDraftInput(
@@ -59,11 +70,8 @@ def test_prelaunch_roots_are_ready_for_scheduler_compaction(consumer, caller_str
         reqs=[SimpleNamespace(kv=SimpleNamespace(req_pool_idx=i)) for i in range(2)],
         req_pool_indices=torch.arange(2, device="cuda"),
     )
-    drafter = DynamicDrafter.__new__(DynamicDrafter)
-    drafter._prelaunch_stream = None
-    drafter._pending = None
-    drafter._chain_width = (lambda bs: chain_width) if chain_width is not None else None
-    drafter._queue_until_decision = lambda bs: 1
+    drafter = _prelaunch_drafter(chain_width)
+    drafter._queue_until_decision = lambda bs, policy, context=0: 1
     drafter._queue_chain = lambda bs, width: max(0, width - 1)
 
     def compact():
@@ -110,10 +118,7 @@ def test_prelaunch_finishes_reading_slots_before_scheduler_reuses_them(caller_st
         reqs=[SimpleNamespace(kv=SimpleNamespace(req_pool_idx=i)) for i in range(2)],
         req_pool_indices=torch.arange(2, device="cuda"),
     )
-    drafter = DynamicDrafter.__new__(DynamicDrafter)
-    drafter._prelaunch_stream = None
-    drafter._pending = None
-    drafter._chain_width = (lambda bs: chain_width) if chain_width is not None else None
+    drafter = _prelaunch_drafter(chain_width)
 
     def queue_steps(bs):
         # A fence after extend alone is too early: draft steps still read slot mappings.
@@ -121,7 +126,7 @@ def test_prelaunch_finishes_reading_slots_before_scheduler_reuses_them(caller_st
         observed.copy_(slots)
         return 1
 
-    drafter._queue_until_decision = queue_steps
+    drafter._queue_until_decision = lambda bs, policy, context=0: queue_steps(bs)
     drafter._queue_chain = lambda bs, width: queue_steps(bs)
     torch.cuda.synchronize()
     done = drafter.prelaunch(batch, extend=lambda: None, inputs=(slots,))
@@ -144,10 +149,7 @@ def test_scheduler_result_copy_does_not_wait_for_prelaunch(caller_stream, chain_
         accept_lens=torch.ones(1, dtype=torch.int32, device="cuda"),
         copy_done=torch.cuda.Event(),
     )
-    drafter = DynamicDrafter.__new__(DynamicDrafter)
-    drafter._prelaunch_stream = None
-    drafter._pending = None
-    drafter._chain_width = (lambda bs: chain_width) if chain_width is not None else None
+    drafter = _prelaunch_drafter(chain_width)
     finished = torch.cuda.Event()
 
     def queue_steps(bs):
@@ -155,7 +157,7 @@ def test_scheduler_result_copy_does_not_wait_for_prelaunch(caller_stream, chain_
         finished.record()
         return 1
 
-    drafter._queue_until_decision = queue_steps
+    drafter._queue_until_decision = lambda bs, policy, context=0: queue_steps(bs)
     drafter._queue_chain = lambda bs, width: queue_steps(bs)
     torch.cuda.synchronize()
     done = drafter.prelaunch(batch, extend=lambda: None, inputs=())

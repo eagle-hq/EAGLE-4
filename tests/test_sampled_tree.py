@@ -205,3 +205,46 @@ def test_token_dependent_descendants_do_not_bias_pruned_root_distribution(width)
         output[mask] = reject_children(p.expand(int(mask.sum()), -1), proposal, coins[mask, :count], final[mask]).tokens
     assert (retained >= 1).all()
     chi_square(output, p)
+
+
+def _keep_like_the_verify_filter(probs, top_k, top_p, min_p):
+    """The target's verify support, element by element: top-k and top-p of the unfiltered row, then min-p."""
+    keep = []
+    for i, p in enumerate(probs.tolist()):
+        higher = [j for j, x in enumerate(probs.tolist()) if x > p or (x == p and j < i)]
+        mass = sum(probs[j].item() for j in higher)
+        keep.append(len(higher) < top_k and mass < top_p and p >= min_p * probs.max().item())
+    return torch.tensor(keep)
+
+
+@pytest.mark.parametrize("temperature, top_k, top_p, min_p", [(1.0, 20, 0.95, 0.0), (0.7, 3, 1.0, 0.0),
+                                                              (1.3, 1 << 30, 0.5, 0.0), (1.0, 1 << 30, 1.0, 0.2),
+                                                              (1.0, 1, 1.0, 0.0)])
+def test_proposal_filter_keeps_the_target_sampler_support(temperature, top_k, top_p, min_p):
+    from eagle_harness.core.sampled_tree import filter_proposal_logits
+
+    gen = torch.Generator().manual_seed(top_k)
+    logits = torch.randn(3, 40, generator=gen) * 2
+    logits[0, 5] = logits[0, 9] = logits[0].max() + 1  # a tie at the top ranks by index
+    ones = torch.ones(3)
+    out = filter_proposal_logits(logits, ones * temperature, ones * top_k, ones * top_p, ones * min_p)
+    probs = torch.softmax(logits / temperature, dim=-1)
+    for row in range(3):
+        keep = _keep_like_the_verify_filter(probs[row], top_k, top_p, min_p)
+        assert torch.equal(torch.isfinite(out[row]), keep)
+        torch.testing.assert_close(out[row][keep], (logits[row] / temperature)[keep])
+
+
+def test_filtered_proposal_keeps_the_rejection_exact():
+    """Zero-q proposals outside the kept support never change the emitted distribution."""
+    from eagle_harness.core.sampled_tree import draw_children, filter_proposal_logits, reject_children
+
+    n = 30000
+    gen = torch.Generator().manual_seed(44)
+    logits = torch.tensor([2.0, 1.5, 0.3, -0.5, -1.0, -3.0]).expand(n, -1)
+    ones = torch.ones(n)
+    filtered = filter_proposal_logits(logits, ones, ones * 2, ones * 0.9, ones * 0)
+    p = torch.tensor([0.05, 0.5, 0.1, 0.0, 0.3, 0.05])
+    draw = draw_children(filtered, torch.arange(6).expand(n, -1), 4, generator=gen)
+    result = reject_children(p.expand(n, -1), draw, torch.rand(n, 4, generator=gen), torch.rand(n, generator=gen))
+    chi_square(result.tokens, p)

@@ -76,7 +76,7 @@ def test_complete_distribution_evidence_passes(sampling_check, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "fault", ["empty", "missing", "refused", "parameters", "prompts", "samples", "tokens", "unnamed"]
+    "fault", ["empty", "missing", "refused", "parameters", "prompts", "samples", "tokens", "unnamed", "api"]
 )
 def test_incomplete_distribution_evidence_fails(sampling_check, tmp_path, fault):
     ref = artifact()
@@ -90,6 +90,8 @@ def test_incomplete_distribution_evidence_fails(sampling_check, tmp_path, fault)
     elif fault == "refused":
         setting.clear()
         setting["refused"] = "unsupported"
+    elif fault == "api":
+        candidate["api"] = "vllm"
     elif fault == "parameters":
         setting["params"]["temperature"] = 0.0
     elif fault == "prompts":
@@ -286,6 +288,50 @@ def test_score_keeps_as_many_tokens_as_bound_the_cut(sampling_check):
     # Near-ties: within one ulp (0.125) either side of the top and of the floor, i.e. 25 ranks around rank 300.
     assert kept == set(range(275)) and possible == set(range(325))
     assert len(sampling_check.bounded_top(pairs, 5000, [TOP_K], 2.0)) == 64
+
+
+@pytest.mark.parametrize("api, expected", [("sglang", 0), ("vllm", 1)])
+def test_joint_and_sequential_cuts_use_the_served_engine(sampling_check, tmp_path, api, expected):
+    # Joint top-k=2/top-p=.5 keeps token 1 (.4 mass before it). Top-k-first
+    # excludes it because .4 / (.4 + .3) exceeds .5. No rounding is involved.
+    ref = artifact()
+    ref["api"] = api
+    ref["prompt_ids"] = PROMPTS
+    setting = ref["settings"]["unrestricted"]
+    setting["params"].update(top_k=2, top_p=0.5)
+    setting["tokens"] = [[[1, 1, 1]] * ref["samples"] for _ in PROMPTS]
+    top = [[20.0 + math.log(p), t] for t, p in enumerate([0.4, 0.3, 0.2, 0.1])]
+    scores = {"tolerance_ulps": 0.0, "contexts": {
+        sampling_check.context_key(prompt + [1] * depth): {"vocab": 4, "top": top}
+        for prompt in PROMPTS for depth in range(3)
+    }}
+    assert compare(sampling_check, tmp_path, ref, copy.deepcopy(ref), scores) == expected
+    # Even in joint mode, a token beyond top-k remains an error.
+    bad = copy.deepcopy(ref)
+    bad["settings"]["unrestricted"]["tokens"][0][0] = [3, 1, 1]
+    assert compare(sampling_check, tmp_path, ref, bad, scores) == 1
+
+
+@pytest.mark.parametrize("joint", [False, True])
+def test_cut_bounds_contain_supported_draws_under_rounding(sampling_check, joint):
+    rng = random.Random(178)
+    for _ in range(100):
+        logits = sorted([rng.uniform(16.0, 24.0) for _ in range(40)], reverse=True)
+        params = dict(TOP_K, top_k=8, top_p=0.7)
+        kept, possible = sampling_check.cut_bounds(
+            [[value, token] for token, value in enumerate(logits)], 40, params, 2.0, joint=joint
+        )
+        moved = [value + rng.uniform(-0.125, 0.125) for value in logits]
+        order = sorted(range(40), key=moved.__getitem__, reverse=True)
+        weights = {token: math.exp(moved[token] - max(moved)) for token in order}
+        total = sum(weights[token] for token in (order if joint else order[:8]))
+        above = 0.0
+        support = set()
+        for token in order[:8]:
+            if above / total < params["top_p"]:
+                support.add(token)
+            above += weights[token]
+        assert kept <= support <= possible
 
 
 def test_self_control_passes_through_bf16_cut_flips(sampling_check, tmp_path):

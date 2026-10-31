@@ -454,6 +454,7 @@ class EagleHarnessWorker(EAGLEWorkerV2):
                 else None
             ),
         )
+        self._drafter.warm_up(capture_bs)
         self._native_decode = NativeDecode(
             self.target_worker,
             self.req_to_token_pool.req_to_token,
@@ -531,6 +532,7 @@ class EagleHarnessWorker(EAGLEWorkerV2):
             if sampled is not None:
                 # Prefilled requests start from sglang's deterministic top-k roots: no recorded proposal distribution.
                 sampled.invalidate(batch.req_pool_indices)
+                sampled.set_sampling(batch.req_pool_indices, batch.sampling_info)
             return self._prefill(batch, on_publish, grammar_barrier, pp_proxy_tensors)
         native_decode = self._native_decode.select(batch)
         if native_decode:
@@ -567,6 +569,7 @@ class EagleHarnessWorker(EAGLEWorkerV2):
             else:
                 with self._draft_context(), spec_stage_span("draft"):
                     batch.spec_info = self._drafter.draft(batch)
+                timer = self._drafter.round_timer
                 width = self._drafter.last_width
                 rounds.round_start(len(batch.seq_lens), width, batch, settled=not self._drafter.seeding)
             with spec_stage_span("verify"):

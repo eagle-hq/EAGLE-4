@@ -208,6 +208,17 @@ class DraftTree:
         """Record the draft KV slots ``[bs, K]`` the depth-``step`` frontier writes."""
         self.ancestors[:bs, :, step - 1] = slots.to(torch.int32)
 
+    def keep_rows(self, rows: torch.Tensor) -> None:
+        """Keep the requests at batch positions ``rows`` (in that order) as rows ``0..len(rows)-1``: a drafted tree
+        then serves the batch that remains once some of its requests left. Rows are independent, so the kept rows
+        are the tree those requests alone would have grown."""
+        n, k = rows.numel(), self.shape.top_k
+        per_request = (self.root_probs, self.root_tokens, self.root_hidden, self.scores, self.tokens, self.parents,
+                       self.front_scores, self.ancestors, self.best, self.best_prev, self.layer_top, self.delta_rows)
+        per_node = (self.front_tokens.view(self.max_bs, k), self.front_hidden.view(self.max_bs, k, -1))
+        for buf in per_request + per_node:
+            buf[:n] = buf.index_select(0, rows)
+
     def step(self, bs: int, step: int, probs: torch.Tensor, tokens: torch.Tensor, hidden: torch.Tensor) -> None:
         """Add the children of the depth-``step`` frontier (``1 <= step < max_depth``).
 

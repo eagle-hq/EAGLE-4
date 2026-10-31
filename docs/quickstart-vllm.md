@@ -46,7 +46,9 @@ curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/jso
   -d '{"model": "Qwen/Qwen3.8-27B", "messages": [{"role": "user", "content": "Explain how a hash table works."}], "max_tokens": 256}'
 ```
 
-The response holds the generated message. Send a few requests before you measure speed.
+The response holds the generated message. Before timing, run one untimed pass of your workload at each concurrency
+to compile kernels and fill any live cost caches
+([benchmark warm-up](faq.md#what-should-i-warm-up-before-timing-a-benchmark)).
 
 ## The measured recipe
 

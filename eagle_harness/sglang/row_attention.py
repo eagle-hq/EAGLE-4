@@ -29,23 +29,25 @@ from eagle_harness.kernels.row_attention import RowsLaunch, rows_attention, rows
 
 # Per mode, the fastest of a sweep at the TP4 draft shapes on B300 (10 heads x 128, 148 SMs, window 4096, bs 1,
 # contexts 1k-4k; attention + merge in a CUDA graph with a cold L2); neighbouring split counts are within ~10%.
-# The sweep's winners put 4 waves of (head, split) programs on the SMs for a step (64 splits) and 1.5 for the extend
-# (24); other GPUs and TP sizes keep those waves (draft_launches). Fixed per server, not autotuned, so the merge
-# order of the splits, and so the outputs, stay the same run to run.
+# The sweep's winners put 4 waves of (request, head, split) programs on the SMs for a step (64 splits) and 1.5 for
+# the extend (24); other GPUs, TP sizes and batch sizes keep those waves (draft_launches). Fixed per captured batch
+# size, not autotuned, so the merge order of the splits, and so the outputs, stay the same run to run.
 STEP_WAVES, EXTEND_WAVES = 4.0, 1.5
 STEP_LAUNCH = RowsLaunch(splits=64, block_n=64)  # a draft step's top-K rows, at the reference shape
 EXTEND_LAUNCH = RowsLaunch(splits=24, block_n=128)  # the draft extend's causal rows, at the reference shape
 MAX_SPLITS = max(STEP_LAUNCH.splits, EXTEND_LAUNCH.splits)
 
 
-def draft_launches(heads: int, device: torch.device) -> Tuple[RowsLaunch, RowsLaunch]:
-    """The (step, extend) launches for ``heads`` draft heads per rank on ``device``: the key splits that keep the
-    reference sweep's program waves (a step's splits a power of two, the extend's a multiple of 8; at most 128)."""
+def draft_launches(programs: int, device: torch.device) -> Tuple[RowsLaunch, RowsLaunch]:
+    """The (step, extend) launches for ``programs`` (request, head) programs per key split (batch size x draft heads
+    per rank) on ``device``: the key splits that keep the reference sweep's program waves (a step's splits a power of
+    two, the extend's a multiple of 8, below 8 a power of two; at most 128)."""
     if device.type != "cuda":
         return STEP_LAUNCH, EXTEND_LAUNCH
     sms = torch.cuda.get_device_properties(device).multi_processor_count
-    step = min(triton.next_power_of_2(triton.cdiv(int(STEP_WAVES * sms), heads)), 128)
-    extend = min(triton.cdiv(triton.cdiv(int(EXTEND_WAVES * sms), heads), 8) * 8, 128)
+    step = min(triton.next_power_of_2(triton.cdiv(int(STEP_WAVES * sms), programs)), 128)
+    extend = triton.cdiv(int(EXTEND_WAVES * sms), programs)
+    extend = min(triton.next_power_of_2(extend), triton.cdiv(extend, 8) * 8, 128)
     return RowsLaunch(splits=step, block_n=STEP_LAUNCH.block_n), RowsLaunch(splits=extend, block_n=EXTEND_LAUNCH.block_n)
 
 
@@ -113,8 +115,9 @@ class DraftRowAttention(AttentionBackend):
         config = draft_runner.model_config
         self.num_heads = config.num_attention_heads // get_parallel().attn_tp_size
         self.head_dim = config.head_dim
-        self.step_launch, self.extend_launch = draft_launches(self.num_heads, device)
-        splits = max(self.step_launch.splits, self.extend_launch.splits)
+        self._device = device
+        # The splits shrink as the batch grows (draft_launches); a batch of one has the most per request.
+        splits = max(launch.splits for launch in draft_launches(self.num_heads, device))
         parts = max_bs * self.num_heads * (splits + 1) * rows_padded(max_rows_per_request)
         self.part_out = torch.empty(parts, self.head_dim, dtype=torch.float32, device=device)
         self.part_lse = torch.empty(parts, dtype=torch.float32, device=device)
@@ -199,6 +202,7 @@ class DraftRowAttention(AttentionBackend):
         q = q.view(rows, self.num_heads, self.head_dim)
         out = torch.empty_like(q)
         rows_per_request, step, seq_lens, req_pool_indices, ancestors = self._group
+        step_launch, extend_launch = draft_launches(rows // rows_per_request * self.num_heads, self._device)
         rows_attention(
             q,
             self.token_to_kv_pool.get_key_buffer(layer.layer_id),
@@ -213,7 +217,7 @@ class DraftRowAttention(AttentionBackend):
             step=step,
             window=self.window,
             scale=layer.scaling,
-            launch=self.extend_launch if step == 0 else self.step_launch,
+            launch=extend_launch if step == 0 else step_launch,
             table_rows=req_pool_indices,
         )
         return out.view(rows, self.num_heads * self.head_dim)

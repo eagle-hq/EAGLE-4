@@ -35,6 +35,31 @@ class RejectionResult(NamedTuple):
     accepted_position: torch.Tensor  # [rows], draw index, or -1 for a residual draw
 
 
+def filter_proposal_logits(
+    logits: torch.Tensor,
+    temperature: torch.Tensor,
+    top_k: torch.Tensor,
+    top_p: torch.Tensor,
+    min_p: torch.Tensor,
+) -> torch.Tensor:
+    """Apply the request's temperature and filter settings to the draft candidate logits.
+
+    Top-k and top-p cut the unfiltered draft probabilities, and min-p drops what is below ``min_p`` times the
+    most likely. Removed candidates get ``-inf`` (q = 0). The draft and target can retain different tokens under
+    the same settings. Recursive rejection uses the recorded q and the target p, including their differing support.
+    Per-row settings are ``[rows]`` tensors; ties rank by candidate index.
+    """
+    scaled = logits.float() / temperature.float()[:, None]
+    probs = torch.softmax(scaled, dim=-1)
+    order = torch.sort(-probs, dim=-1, stable=True).indices
+    rank = torch.empty_like(order)
+    rank.scatter_(1, order, torch.arange(logits.shape[1], device=logits.device).expand_as(order).contiguous())
+    above = (probs.gather(1, order).cumsum(dim=-1) - probs.gather(1, order)).gather(1, rank)
+    keep = (rank < top_k[:, None]) & (above < top_p[:, None])
+    keep &= probs >= min_p[:, None] * probs.amax(dim=-1, keepdim=True)
+    return scaled.masked_fill(~keep, float("-inf"))
+
+
 def draw_children(
     logits: torch.Tensor,
     token_ids: torch.Tensor,

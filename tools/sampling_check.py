@@ -293,13 +293,15 @@ def _sibling(name: str):
     return sys.modules[name]
 
 
-def cut_bounds(top: Sequence[Sequence[float]], vocab: int, params: dict, tolerance_ulps: float) -> Tuple[Set, Set]:
+def cut_bounds(
+    top: Sequence[Sequence[float]], vocab: int, params: dict, tolerance_ulps: float, *, joint: bool = False
+) -> Tuple[Set, Set]:
     """(tokens every tolerated logit keeps, tokens some tolerated logit keeps) under the setting's cut.
 
     ``top``: fp32 ``[logit, token]`` pairs, best first; the ``vocab - len(top)`` other tokens are at most the last
     logit. Each logit may move by ``tolerance_ulps / 2`` bf16 ulps at its magnitude, so the gap of a pair moves by up
-    to ``tolerance_ulps`` (the fp32 arbiter's rule). The cut is top-k, then top-p on the renormalized top-k
-    distribution at the setting's temperature, or min-p alone (vLLM's and sglang's order)."""
+    to ``tolerance_ulps`` (the fp32 arbiter's rule). SGLang applies top-k and top-p jointly to the full
+    distribution. Otherwise top-p uses the renormalized top-k distribution. Min-p alone is also supported."""
     ulp = _sibling("fp32_arbiter").bf16_ulp
     temperature, k, top_p, min_p = params["temperature"], params["top_k"], params["top_p"], params["min_p"]
     k = None if k in (-1, 0) else k
@@ -331,10 +333,11 @@ def cut_bounds(top: Sequence[Sequence[float]], vocab: int, params: dict, toleran
     above_hi, above_lo = counter(hi), counter(lo)
 
     # In the top k for every tolerated logit (fewer than k others can reach it) / for some (fewer than k others are
-    # surely above it). Only these tokens enter the top-p sums.
+    # surely above it). Joint top-p uses all tokens, independently of the top-k cut.
     in_k = [k is None or above_hi(lo[i]) - count[i] < k for i in range(n)]
     maybe_k = [count[i] > 0 and (k is None or above_lo(hi[i]) < k) for i in range(n)]
-    pool = [j for j in range(n) if maybe_k[j]]
+    in_p = [joint or keep for keep in in_k]
+    pool = [j for j in range(n) if joint or maybe_k[j]]
     by_hi = sorted(range(n), key=lambda j: hi[j], reverse=True)[:2]  # the two largest bounds of each side, for min-p
     by_lo = sorted(range(n), key=lambda j: lo[j], reverse=True)[:2]
     kept, possible = [], []
@@ -344,9 +347,9 @@ def cut_bounds(top: Sequence[Sequence[float]], vocab: int, params: dict, toleran
             # Kept when the renormalized mass of the tokens above it is below top_p: bound that share both ways.
             others = [j for j in pool if j != i]
             above_max = sum(count[j] * mass(hi[j]) for j in others if hi[j] > lo[i])
-            below_min = mass(lo[i]) + sum(count[j] * mass(lo[j]) for j in others if hi[j] < lo[i] and in_k[j])
+            below_min = mass(lo[i]) + sum(count[j] * mass(lo[j]) for j in others if hi[j] < lo[i] and in_p[j])
             sure = sure and above_max / (above_max + below_min) < top_p
-            above_min = sum(count[j] * mass(lo[j]) for j in others if lo[j] > hi[i] and in_k[j])
+            above_min = sum(count[j] * mass(lo[j]) for j in others if lo[j] > hi[i] and in_p[j])
             rest_max = count[i] * mass(hi[i]) + sum(count[j] * mass(hi[j]) for j in others if lo[j] <= hi[i])
             maybe = above_min / (above_min + rest_max) < top_p
         if min_p > 0.0:
@@ -384,12 +387,13 @@ def context_key(ids: Sequence[int]) -> str:
 
 
 def bounded_top(pairs: Sequence[Sequence[float]], vocab: int, settings: Sequence[dict], tolerance_ulps: float) -> list:
-    """The shortest head of ``pairs`` (fp32 ``[logit, token]``, best first) that bounds every setting's cut."""
+    """The shortest head of ``pairs`` that bounds every setting for both joint and sequential filtering."""
     size = min(64, len(pairs))
     while True:
         try:
             for params in settings:
-                cut_bounds(pairs[:size], vocab, params, tolerance_ulps)
+                for joint in (False, True):
+                    cut_bounds(pairs[:size], vocab, params, tolerance_ulps, joint=joint)
             return list(pairs[:size])
         except ValueError:
             if size == len(pairs):
@@ -428,6 +432,8 @@ def score(args) -> int:
 
 def validate_pair(ref: dict, cand: dict) -> None:
     """Reject partial evidence before a statistical test can silently omit it."""
+    if ref.get("api") != cand.get("api"):
+        raise ValueError("reference and candidate must use the same engine API")
     if not ref["settings"] or ref["settings"].keys() != cand["settings"].keys():
         raise ValueError("reference and candidate must contain the same nonempty settings")
     length = ref["max_new_tokens"]
@@ -485,6 +491,8 @@ def cut_tests(
     scores: dict,
     tally: List[int],
     outside: list,
+    *,
+    joint: bool = False,
 ) -> list:
     """A truncated setting's tests at its judged contexts, on the draws among the tokens every tolerated logit keeps.
     Counts near-tie and outside draws into ``tally`` and lists the outside tokens in ``outside``."""
@@ -494,7 +502,9 @@ def cut_tests(
         context = scores["contexts"].get(context_key(list(prompt_ids) + list(prefix)))
         if context is None:
             raise ValueError(f"{name}: prompt {prompt} prefix {list(prefix)} was not scored")
-        kept, possible = cut_bounds(context["top"], context["vocab"], params, scores["tolerance_ulps"])
+        kept, possible = cut_bounds(
+            context["top"], context["vocab"], params, scores["tolerance_ulps"], joint=joint
+        )
         draws = [[t[depth] for t in tokens if tuple(t[:depth]) == prefix] for tokens in (r_tokens, c_tokens)]
         what = "token 1" if depth == 0 else f"token {depth + 1} | modal prefix"
         tests.append((name, prompt, what, *homogeneity(*[[t for t in d if t in kept] for d in draws])))
@@ -531,9 +541,13 @@ def compare(args) -> int:
                 raise ValueError(f"{name} truncates: judge it with --scores (see score)")
             for i, (r_tokens, c_tokens) in enumerate(zip(ref["settings"][name]["tokens"], entry["tokens"])):
                 if truncates(params):
+                    assert scores is not None
                     tally = cuts.setdefault(name, [0, 0, 0, 0])
                     prompt_ids = ref["prompt_ids"][i]
-                    tests += cut_tests(name, params, i, prompt_ids, r_tokens, c_tokens, scores, tally, outside)
+                    tests += cut_tests(
+                        name, params, i, prompt_ids, r_tokens, c_tokens, scores, tally, outside,
+                        joint=ref.get("api") == "sglang",
+                    )
                 else:
                     tests += mixed_tests(name, i, r_tokens, c_tokens)
     except (KeyError, ValueError) as error:  # unscored contexts, or a cut the scores cannot bound

@@ -166,6 +166,7 @@ def make_worker(modules, monkeypatch, *, calibration=None, schedule=None, native
         draft=draft,
         last_width=4,
         timer=None,
+        round_timer=None,
         seeding=False,
         prelaunch=prelaunch,
     )
@@ -215,8 +216,9 @@ def make_worker(modules, monkeypatch, *, calibration=None, schedule=None, native
 def test_sampled_tree_follows_the_batch_and_never_verifies_roots_drafted_without_it(modules, monkeypatch):
     worker, _, _ = make_worker(modules, monkeypatch, native=False)
     worker.topk = 4
-    invalidated = []
-    sampled = SimpleNamespace(active=False, root_valid=torch.ones(8, dtype=torch.bool), invalidate=invalidated.append)
+    invalidated, settings = [], []
+    sampled = SimpleNamespace(active=False, root_valid=torch.ones(8, dtype=torch.bool), invalidate=invalidated.append,
+                              set_sampling=lambda slots, info: settings.append((slots, info)))
     worker._draft_worker.steps = SimpleNamespace(sampled=sampled)
     monkeypatch.setattr(modules.base, "forward_batch_generation", lambda self, *args: "prefill", raising=False)
 
@@ -240,6 +242,7 @@ def test_sampled_tree_follows_the_batch_and_never_verifies_roots_drafted_without
     prefill = batch(1.0, mode=Mode.EXTEND)
     assert worker.forward_batch_generation(prefill) == "prefill"
     assert invalidated == [prefill.req_pool_indices]
+    assert settings == [(prefill.req_pool_indices, prefill.sampling_info)]  # its requests' proposals follow their sampler
 
 
 @pytest.mark.parametrize("overlap", [False, True])
@@ -393,6 +396,9 @@ def test_attention_initialization_wires_the_same_width_plan_into_both_routes(mod
 
         def __init__(self, *args, chain_width, **kwargs):
             self.chain_width = chain_width
+
+        def warm_up(self, batch_sizes):
+            self.warmed = list(batch_sizes)
 
     module = modules.worker
     monkeypatch.setattr(modules.base, "init_attention_backends", lambda self: None, raising=False)

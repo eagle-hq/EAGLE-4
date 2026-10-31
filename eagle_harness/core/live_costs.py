@@ -144,13 +144,29 @@ class LiveCosts:
     seed_samples: int = 3
     alpha: float = 0.05
     cells: Dict[Tuple[int, int, int], Cell] = field(default_factory=dict)  # (bucket, width, interval)
+    # Sample counts per (bucket, width) and the ready buckets, indexed from ``cells`` (rebuilt when it is replaced):
+    # the drafter asks every round, and a scan of every cell costs far more than the answer.
+    _counts: Dict[Tuple[int, int], int] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _ready: set = field(default_factory=set, init=False, repr=False, compare=False)
+    _indexed: Optional[dict] = field(default=None, init=False, repr=False, compare=False)
 
     def interval(self, context: int) -> int:
         """Context interval of an average committed length (the tables' ``interval_index``)."""
         return min(max((context - self.context_step) // self.context_step, 0), self.context_intervals - 1)
 
+    def _index(self) -> None:
+        """Bring the counts and ready buckets up to date with ``cells`` (a new dict after a load or a TP sync)."""
+        if self._indexed is self.cells:
+            return
+        self._indexed = self.cells
+        self._counts = {}
+        for (b, w, _), c in self.cells.items():
+            self._counts[b, w] = self._counts.get((b, w), 0) + c.samples
+        self._ready = {b for b, _ in self._counts if self._is_ready(b)}
+
     def _samples(self, bucket: int, width: int) -> int:
-        return sum(c.samples for (b, w, _), c in self.cells.items() if b == bucket and w == width)
+        self._index()
+        return self._counts.get((bucket, width), 0)
 
     def seed_width(self, bucket: int) -> Optional[int]:
         """The verify width the next round at ``bucket`` must force, None once the bucket is seeded.
@@ -163,20 +179,46 @@ class LiveCosts:
                 return width
         return None
 
+    def _is_ready(self, bucket: int) -> bool:
+        return self.seed_width(bucket) is None and self._samples(bucket, DRAFT_WIDTH) >= self.seed_samples
+
     def ready(self, bucket: int) -> bool:
         """Whether the bucket's cells price every captured width and the draft step."""
-        return self.seed_width(bucket) is None and self._samples(bucket, DRAFT_WIDTH) >= self.seed_samples
+        self._index()
+        return bucket in self._ready
+
+    def _bracket(self, bucket: int) -> Optional[Tuple[int, int]]:
+        """The nearest ready buckets below and above an unready ``bucket``, None unless both exist."""
+        if self.ready(bucket):
+            return None
+        below = max((b for b in self._ready if b < bucket), default=None)
+        above = min((b for b in self._ready if b > bucket), default=None)
+        return None if below is None or above is None else (below, above)
+
+    def priced(self, bucket: int) -> bool:
+        """Whether the bucket has a table without a seed sweep: it is ready, or it lies between two ready
+        buckets, which price it by linear interpolation in the batch size (:meth:`tables`).
+
+        Verify and draft costs grow smoothly with the batch size, so a bucket the load visits only briefly (the
+        sizes a batch drains through) is priced from its neighbours instead of forcing narrow verify widths on its
+        served rounds; its own served rounds refine the widths they run.
+        """
+        return self.ready(bucket) or self._bracket(bucket) is not None
 
     def record(self, bucket: int, width: int, context: int, us: float) -> None:
         """Add one served timing (``width`` 0: one draft step)."""
         if not math.isfinite(us) or us <= 0:
             return
+        self._index()
         cell = self.cells.setdefault((bucket, width, self.interval(context)), Cell())
         if cell.samples < self.seed_samples:
             cell.us = us if cell.samples == 0 else min(cell.us, us)
         else:
             cell.us += self.alpha * (min(us, OUTLIER_RATIO * cell.us) - cell.us)
         cell.samples += 1
+        self._counts[bucket, width] = self._counts.get((bucket, width), 0) + 1
+        if bucket not in self._ready and self._is_ready(bucket):
+            self._ready.add(bucket)
 
     # ---------------------------------------------------------------- tables
     def _value(self, bucket: int, width: int, interval: int) -> Optional[float]:
@@ -191,20 +233,51 @@ class LiveCosts:
 
     def verify_us(self, bucket: int, width: int) -> Optional[float]:
         """The priced verify of ``width`` tokens per request at ``bucket`` (shortest context first), None untimed."""
-        return self._value(bucket, width, 0)
+        value = self._value(bucket, width, 0)
+        if value is None and self._bracket(bucket) is not None:
+            value = self._priced(bucket, width, 0)
+        return value
 
-    def tables(self) -> Dict[int, BatchCostTable]:
-        """One table per ready bucket (the cost model's input), from the current cells."""
+    def _width_value(self, bucket: int, width: int, interval: int) -> float:
+        """A ready bucket's cost at ``width``, linear between its measured widths (they include 1 and the widest)."""
+        if width == DRAFT_WIDTH or width in self.widths(bucket):
+            return self._value(bucket, width, interval) or 0.0
+        widths = sorted(self.widths(bucket))
+        lo = max((w for w in widths if w < width), default=widths[0])
+        hi = min((w for w in widths if w > width), default=widths[-1])
+        lo_us, hi_us = self._value(bucket, lo, interval) or 0.0, self._value(bucket, hi, interval) or 0.0
+        return lo_us if hi == lo else lo_us + (width - lo) / (hi - lo) * (hi_us - lo_us)
+
+    def _priced(self, bucket: int, width: int, interval: int) -> float:
+        """An unready bucket's cost: its own fully sampled cell at this interval, else linear in the batch size
+        between the ready buckets around it (:meth:`priced`)."""
+        own = self.cells.get((bucket, width, interval))
+        if own is not None and own.samples >= self.seed_samples:
+            return own.us
+        bracket = self._bracket(bucket)
+        if bracket is None:
+            raise ValueError(f"batch bucket {bucket} has no ready buckets on both sides")
+        below, above = bracket
+        lo_us, hi_us = self._width_value(below, width, interval), self._width_value(above, width, interval)
+        return lo_us + (bucket - below) / (above - below) * (hi_us - lo_us)
+
+    def tables(self, also: Sequence[int] = ()) -> Dict[int, BatchCostTable]:
+        """One table per priced bucket that has cells or is in ``also`` (the cost model's input), from the current
+        cells: a ready bucket's own, an unready one's interpolated from its neighbours where it lacks them."""
         tables: Dict[int, BatchCostTable] = {}
-        for bucket in sorted({b for b, _, _ in self.cells}):
-            if not self.ready(bucket):
+        for bucket in sorted({b for b, _, _ in self.cells} | set(also)):
+            if self.ready(bucket):
+                value = self._value
+            elif self._bracket(bucket) is not None:
+                value = self._priced
+            else:
                 continue
             widths = sorted(self.widths(bucket))
             intervals: List[IntervalCost] = []
             ratios: List[float] = []
             for i in range(self.context_intervals):
-                target = [self._value(bucket, w, i) or 0.0 for w in widths]
-                draft = self._value(bucket, DRAFT_WIDTH, i) or 0.0
+                target = [value(bucket, w, i) or 0.0 for w in widths]
+                draft = value(bucket, DRAFT_WIDTH, i) or 0.0
                 intervals.append(IntervalCost(_curve(target, [w - 1 for w in widths]), _curve([draft], [0])))
                 ratios.append(round(target[0] / draft, 4))
             tables[bucket] = BatchCostTable(

@@ -114,6 +114,8 @@ class NativeDecode:
         self._requests = NoSpecRequests() if enabled else None
         self._track_mamba = track_mamba
         self._verify_limit = verify_limit  # larger batches decode natively
+        if enabled:
+            warm_up(getattr(req_to_token, "device", None))
         # The running batch the next prefill's requests join: the last decode's rows plus the requests prefilled since.
         self._decoding: tuple = ()
         self._since = 0
@@ -157,6 +159,20 @@ class NativeDecode:
             grammar_barrier()
         self._rounds.round_start(len(batch.reqs), 0, batch)
         return plain_decode(batch, self._target_worker, self._req_to_token, track_mamba=self._track_mamba)
+
+
+def warm_up(device: Optional[torch.device]) -> None:
+    """Build, before serving, the engine kernel that only native decode uses in a speculative server: the decode
+    positions (``clamp_position`` on the int64 sequence lengths, a JIT module that nvcc builds in about 3 s). A server
+    otherwise builds it at its first native round, mid-serving, where the build stalls every running request and the
+    served policy's measurement of native decode."""
+    if device is None or device.type != "cuda":
+        return
+    try:
+        from sglang.kernels.ops.attention.clamp_position import clamp_position
+    except ImportError:  # an engine without the JIT module computes the positions in torch
+        return
+    clamp_position(torch.ones(1, dtype=torch.int64, device=device))
 
 
 def plain_decode(

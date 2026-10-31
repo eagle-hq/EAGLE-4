@@ -89,6 +89,33 @@ def test_frontier_hidden_and_ancestors_follow_parents():
     assert torch.equal(tree.front_tokens[:K], ids.view(-1)[pick])
 
 
+def _grow(bs, root_p, root_ids, root_h, rounds, max_bs=None):
+    tree = DraftTree(TreeShape(K, DEPTH), max_bs or bs, H, torch.float32, torch.device("cpu"), max_verify=32)
+    _begin(tree, bs, root_p, root_ids, root_h)
+    for step, (p, ids, hidden) in enumerate(rounds, start=1):
+        tree.set_step_slots(bs, step, torch.arange(bs * K).view(bs, K) + 100 * step)
+        tree.step(bs, step, p, ids, hidden)
+    return tree
+
+
+def test_kept_rows_are_the_tree_of_the_kept_requests():
+    """A tree grown for 4 requests, compacted to requests 3, 0 and 2, equals the tree grown for those 3 alone."""
+    bs, keep = 4, torch.tensor([3, 0, 2])
+    root_p, root_ids, root_h, rounds = _random_round(bs, 3, seed=5)
+    tree = _grow(bs, root_p, root_ids, root_h, rounds)
+    tree.keep_rows(keep)
+    nodes = (keep[:, None] * K + torch.arange(K)).reshape(-1)  # the kept requests' frontier rows
+    kept_rounds = [(p[nodes], ids[nodes], hidden[nodes]) for p, ids, hidden in rounds]
+    alone = _grow(3, root_p[keep], root_ids[keep], root_h[keep], kept_rounds, max_bs=bs)
+    for name in ("root_probs", "root_tokens", "root_hidden", "scores", "tokens", "parents", "front_scores",
+                 "best", "best_prev", "layer_top", "delta_rows"):
+        assert torch.equal(getattr(tree, name)[:3], getattr(alone, name)[:3]), name
+    assert torch.equal(tree.front_tokens[: 3 * K], alone.front_tokens[: 3 * K])
+    assert torch.equal(tree.front_hidden[: 3 * K], alone.front_hidden[: 3 * K])
+    first = _grow(bs, root_p, root_ids, root_h, rounds)
+    assert torch.equal(tree.ancestors[:3], first.ancestors[keep])
+
+
 def _fork_work_deltas(work_scores, node_count, top_k, verify_num):
     """calculate_work_deltas_kernel, one row."""
     out = []

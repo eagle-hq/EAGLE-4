@@ -6,7 +6,6 @@ import torch
 
 from eagle_harness.kernels.sampled_draw import sample_children
 
-
 class SampledTree:
     """Static proposal storage; node ids remain the ordinary DraftTree ids.
 
@@ -33,6 +32,8 @@ class SampledTree:
         self.ids = torch.zeros_like(self.q, dtype=torch.int64)
         self.positions = torch.zeros((rows, tree.tokens.shape[1]), dtype=tree.tokens.dtype, device=device)
         self.root_valid = torch.zeros(rows, dtype=torch.bool, device=device)
+        # Per store row: 1/temperature, top-k, top-p, min-p of the request (identity until set_sampling writes it).
+        self.filters = torch.tensor([1.0, float(1 << 30), 1.0, 0.0], device=device).repeat(rows, 1)
         self.seed = int(seed)
         self.round = torch.zeros(1, dtype=torch.int32, device=device)
         self.active = False
@@ -60,7 +61,21 @@ class SampledTree:
             start=self.tree.shape.layer_start(step + 1),
             rows_per_req=rows,
             req_index=self.req_index[:bs],
+            filters=self.filters,
         )
+
+    def set_sampling(self, req_pool_indices: torch.Tensor, sampling_info) -> None:
+        """Record each request's sampling settings at its pool slot, so its proposals follow the target's sampler."""
+        settings = torch.stack(
+            (
+                1.0 / sampling_info.temperatures.view(-1).float(),
+                sampling_info.top_ks.float(),
+                sampling_info.top_ps.float(),
+                sampling_info.min_ps.float(),
+            ),
+            dim=1,
+        )
+        self.filters.index_copy_(0, req_pool_indices.to(device=self.filters.device, dtype=torch.int64), settings)
 
     def invalidate(self, req_pool_indices: torch.Tensor) -> None:
         """Requests whose root tokens come from a prefill (no recorded q): their first round emits one target token."""

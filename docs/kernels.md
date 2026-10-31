@@ -33,7 +33,7 @@ coverage, not serving qualification. Native CUDA builds apply only to NVIDIA tar
 |---|---|---|
 | candidate head: shard top-k, exact re-scoring of candidates (fp32 products), candidate tail | `candidate_ops`, `gather_dot`, `candidate_triton`, `csrc/candidate.cu` | every draft step and draft extend |
 | draft tree step: scores, next frontier, ancestors, the cost model's work deltas | `tree_step` | every draft step |
-| draft row attention: each row's sliding window plus its own tree ancestors, split over the keys (the split count follows the SM count and the draft heads per rank, fixed per server) | `sglang/row_attention.py`, `vllm/draft_attention.py` | every draft step and draft extend |
+| draft row attention: each row's sliding window plus its own tree ancestors, split over the keys (the split count follows the SM count and the batch's (request, head) programs, fixed per captured batch size) | `sglang/row_attention.py`, `vllm/draft_attention.py` | every draft step and draft extend |
 | GDN tree verify: ancestor tables, tree causal conv1d, tree gated delta rule recurrence | `gdn_tree`, `gdn_tree_gluon` | every verify of a hybrid (GDN) target |
 | Mamba2 tree verify: ancestor tables, tree causal conv1d | `gdn_tree`, `gdn_tree_conv` | every verify of a Mamba2 hybrid (NemotronH) target on sglang |
 | tree verify attention, split over the committed context | `vllm/verify_attention.py` | every verify on vLLM |

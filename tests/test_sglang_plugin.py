@@ -609,4 +609,30 @@ def test_draft_attention_splits_keep_the_reference_waves(monkeypatch):
     assert [ra.draft_launches(h, cuda)[0].splits for h in (40, 20, 5)] == [16, 32, 128]  # TP1, TP2, TP8
     assert [ra.draft_launches(h, cuda)[1].splits for h in (40, 20, 5)] == [8, 16, 48]
     assert ra.draft_launches(1, cuda)[0].splits == ra.draft_launches(1, cuda)[1].splits == 128  # the cap
+    # A batch multiplies the (request, head) programs: TP1 at batch 4, 8, 32 keeps the waves with fewer splits.
+    assert [ra.draft_launches(bs * 40, cuda)[0].splits for bs in (4, 8, 32)] == [4, 2, 1]
+    assert [ra.draft_launches(bs * 40, cuda)[1].splits for bs in (2, 4, 8, 32)] == [4, 2, 1, 1]
     assert ra.draft_launches(10, torch.device("cpu")) == (ra.STEP_LAUNCH, ra.EXTEND_LAUNCH)
+
+
+@pytest.mark.parametrize("bs,step", [(1, 0), (1, 3), (32, 0), (32, 3)])
+def test_draft_attention_launch_follows_the_batch(monkeypatch, bs, step):
+    """A draft forward takes the launch of its own batch size (captured per batch size), not batch one's."""
+    from eagle_harness.sglang import row_attention as ra
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda device: SimpleNamespace(multi_processor_count=148))
+    seen = []
+    monkeypatch.setattr(ra, "rows_attention", lambda *args, launch, **kwargs: seen.append(launch))
+    pool = SimpleNamespace(set_kv_buffer=lambda *a: None, get_key_buffer=lambda i: None, get_value_buffer=lambda i: None)
+    backend = ra.DraftRowAttention.__new__(ra.DraftRowAttention)
+    backend.token_to_kv_pool, backend.req_to_token, backend.window = pool, None, 0
+    backend.num_heads, backend.head_dim, backend._device = 40, 8, torch.device("cuda")
+    backend.part_out = backend.part_lse = None
+    rows = 8 if step == 0 else 4
+    backend._group = (rows, step, None, None, None)
+    backend.forward_decode(
+        torch.zeros(bs * rows, 40 * 8), None, None, SimpleNamespace(layer_id=0, scaling=1.0), None, save_kv_cache=False
+    )
+    want = ra.draft_launches(bs * 40, torch.device("cuda"))[0 if step else 1]
+    assert seen == [want]
+    assert want.splits == {(1, 0): 8, (1, 3): 16, (32, 0): 1, (32, 3): 1}[(bs, step)]

@@ -414,6 +414,28 @@ def test_batches_above_the_verify_limit_capture_only_the_native_decode_graph():
     assert native.forward_mode is ForwardMode.DECODE
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_the_native_route_builds_its_decode_position_kernel_before_serving(monkeypatch, enabled):
+    """The engine computes native decode's positions with a JIT module (nvcc, about 3 s); a server with the native route
+    builds it at startup, not at its first native round mid-serving."""
+    pytest.importorskip("sglang")
+    import torch
+
+    from sglang.kernels.ops.attention import clamp_position as engine_positions
+
+    from eagle_harness.sglang import plain_decode as plain_module
+
+    built = []
+    monkeypatch.setattr(engine_positions, "clamp_position", lambda seq_lens: built.append(seq_lens.dtype))
+    monkeypatch.setattr(plain_module.torch, "ones", lambda *shape, dtype, device: torch.zeros(*shape, dtype=dtype))
+    on_gpu = SimpleNamespace(device=torch.device("cuda"))
+    plain_module.NativeDecode(None, on_gpu, None, enabled=enabled)
+    assert built == ([torch.int64] if enabled else [])
+    plain_module.NativeDecode(None, SimpleNamespace(device=torch.device("cpu")), None, enabled=enabled)
+    plain_module.NativeDecode(None, None, None, enabled=enabled)
+    assert built == ([torch.int64] if enabled else [])
+
+
 def test_prefills_joining_a_batch_above_the_verify_limit_skip_the_draft_for_life():
     pytest.importorskip("sglang")
     from eagle_harness.sglang.plain_decode import NativeDecode

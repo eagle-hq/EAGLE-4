@@ -85,8 +85,9 @@ curl --fail http://127.0.0.1:30000/generate \
   -d '{"text":"Explain how a hash table works.","sampling_params":{"temperature":0,"max_new_tokens":128}}'
 ```
 
-The response must contain generated text and token metadata. The first request includes cold work because
-the measured launch skips server warmup. Repeat it before timing. In Docker, bind the server to `0.0.0.0`
+The response must contain generated text and token metadata. Before timing, run one untimed pass of your workload
+at each concurrency to compile kernels and fill cost caches
+([benchmark warm-up](faq.md#what-should-i-warm-up-before-timing-a-benchmark)). In Docker, bind the server to `0.0.0.0`
 inside the container while publishing only the loopback host port.
 Stop the server with Ctrl-C before changing its graph sizes or starting another GPU process.
 
@@ -103,7 +104,8 @@ The no-spec control is our own installed engine on the same MI355X, target weigh
 with speculation disabled and the ordinary overlapping scheduler. It was measured once per
 concurrency with twice the Mamba cache cap. Measurements use 44 conversations / 60 turns,
 1,024 maximum new tokens, greedy decoding and a separate warmup pass. At concurrency 1,
-the running-request cap, decode graph batch sizes and Mamba cache cap are all reduced to 1.
+both servers use a running-request cap and decode graph batch size of 1. The Mamba cache cap is 1 for EAGLE-4
+and 2 for the no-spec control.
 The packaged MI355X profile was selected without a source overlay or profile override.
 
 Each start also passed 20 greedy prompts against an installed no-spec control. Both C1 starts

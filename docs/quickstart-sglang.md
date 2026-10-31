@@ -77,8 +77,9 @@ sglang serve --model-path Qwen/Qwen3.8-27B --tp-size 4 --dtype bfloat16 \
   --speculative-algorithm-config '{"mode":"serve"}'
 ```
 
-The benchmark warmed the server from its client, hence `--skip-server-warmup`: the first request after this start
-compiles kernels and seeds the costs. Keep CUDA graph padding enabled, and do not add
+Before timing, run one untimed pass of your workload at each concurrency to compile kernels and fill cost caches
+([benchmark warm-up](faq.md#what-should-i-warm-up-before-timing-a-benchmark)). The measured command uses client
+warm-up with `--skip-server-warmup`. Keep CUDA graph padding enabled, and do not add
 `--disable-cuda-graph-padding`. `--max-running-requests 32` is the tree default; set a larger cap, up to 512, for
 larger batches, or serve with the [high-load recipe](#high-load).
 
