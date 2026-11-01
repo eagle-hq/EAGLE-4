@@ -10,4 +10,4 @@ Layout:
     sglang/   sglang plugin: algorithm (hooks), workers, draft steps, tree attention, draft model
 """
 
-__version__ = "0.1.4"  # x-release-please-version
+__version__ = "0.1.5"  # x-release-please-version

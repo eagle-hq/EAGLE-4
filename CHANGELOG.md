@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.5 (2026-10-31)
+
+
+### Bug fixes
+
+* **sglang:** draw sampled-tree proposals from the served sampling settings
+* **sglang:** filter proposal draws for sampled trees
+* **sglang:** judge sampling cuts in engine filter order
+* **sglang:** price draining batch sizes from their neighbours, compile the round tail at startup
+
+
+### Performance
+
+* **sglang:** build the native-decode position kernel at startup
+* **sglang:** keep prelaunched drafts and capture verify-tail graphs once a batch size recurs
+* **sglang:** size draft attention splits by the batch's programs
+
 ## 0.1.4 (2026-10-28)
 
 ### Bug fixes
