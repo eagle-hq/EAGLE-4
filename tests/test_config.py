@@ -39,6 +39,14 @@ def test_inline_json_and_file(tmp_path):
     assert harness_config_from_dict(config_to_dict(cfg)) == cfg
 
 
+def test_config_file_with_a_utf8_bom(tmp_path):
+    # Editors such as Windows Notepad may save JSON with a leading byte order mark.
+    path = tmp_path / "harness.json"
+    path.write_text(json.dumps({"data_path": "/cost/qwen", "intensity": "chain_intensity"}), encoding="utf-8-sig")
+    cfg = parse_harness_config(str(path))
+    assert cfg.data_path == "/cost/qwen" and cfg.intensity is ComputeIntensity.CHAIN
+
+
 @pytest.mark.parametrize(
     "raw, message",
     [
