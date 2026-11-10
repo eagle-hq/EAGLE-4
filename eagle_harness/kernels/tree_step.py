@@ -17,6 +17,11 @@ from the root; :func:`work_deltas` computes the begin slot's deltas. :func:`tree
 :func:`tree_select` replace the ten or so small torch launches of :meth:`DraftTree.rank_reference` and
 the node sort and token gather of :meth:`DraftTree.select`; :func:`select_rows` turns the grown tree into verify rows
 with the row of each row's parent (:meth:`DraftTree.verify_rows`; was ~30 torch kernels, ~90 us per round).
+
+The ``treestep`` version (:data:`TREESTEP`, ktest's ``harness=treestep``) keeps every output bit but the deltas' (fp32
+rounding): a step and begin are one launch each, deltas and their batch mean included, and the frontier's hidden rows
+are copied by programs of their own when the batch is small (H200, served tree: 90 -> 55 us a 12-level round at one
+request, 120 -> 67 at four, 915 -> 276 at 512).
 """
 
 from __future__ import annotations
@@ -26,6 +31,12 @@ from typing import Tuple
 import torch
 import triton
 import triton.language as tl
+
+from eagle_harness.kernels import variant
+
+# The tree's merges by rank instead of sorts, the batch mean of the work deltas and begin's deltas in the step's own
+# launch, the step's KV slots in one copy.
+TREESTEP = variant.name("treestep")
 
 
 @triton.jit
@@ -140,6 +151,8 @@ def tree_step(
         raise ValueError("tree_step needs unit column strides")
     if tokens.dtype != torch.int64:
         tokens = tokens.long()
+    if variant.current == TREESTEP:
+        return _tree_step_merge(tree, bs, step, probs, tokens, hidden, deltas)
     depth = tree.ancestors.shape[-1]
     # One row writes its deltas straight into the slot; several rows write theirs side by side, then their mean.
     rows_out = tree.deltas[step] if bs == 1 else tree.delta_rows
@@ -286,8 +299,11 @@ def _tree_begin_kernel(
         tl.store(front_hidden_ptr + (b * K + n)[:, None] * front_hidden_stride + h[None, :], row[None, :], mask=hm)
 
 
-def tree_begin(tree, bs: int, root_score: float) -> None:
-    """:meth:`DraftTree.begin` (without the work deltas) in one launch."""
+def tree_begin(tree, bs: int, root_score: float, deltas: bool = False) -> None:
+    """:meth:`DraftTree.begin` in one launch; ``deltas``: also store ``tree.deltas[0]`` (another launch, but in the
+    treestep version)."""
+    if variant.current == TREESTEP:
+        return _tree_begin_merge(tree, bs, root_score, deltas)
     shape = tree.shape
     k = shape.top_k
     hidden = tree.root_hidden
@@ -314,6 +330,8 @@ def tree_begin(tree, bs: int, root_score: float) -> None:
         BLOCK_H=1024,
         num_warps=4,
     )
+    if deltas:
+        work_deltas(tree, bs, 0)
 
 
 @triton.jit
@@ -484,3 +502,351 @@ def select_rows(
         K=top_k,
     )
     return out_tokens, out_parent_rows
+
+
+# ---- the treestep version: no sorts, one launch a step (the batch mean included), begin's deltas in begin's launch,
+# and a few rows' hidden copies in copier programs beside the row's own
+
+
+@triton.jit
+def _merged_sums(
+    old_ptr,  # the row's old best set [CAP] fp32, sorted descending (unless ROOTED)
+    root_score,
+    top,  # [K_P] fp32 the layer's best K scores, sorted descending (lanes past K unused)
+    K: tl.constexpr,
+    K_P: tl.constexpr,
+    CAP: tl.constexpr,
+    CAP_P: tl.constexpr,
+    J_P: tl.constexpr,
+    V_P: tl.constexpr,
+    ROOTED: tl.constexpr,  # the old set is the root alone (begin)
+):
+    """[J_P, V_P]: row j holds the prefix sums of the old best set merged with ``top[:j]``, the work deltas of every
+    budget: both lists are sorted, so each of top's scores lands after the old scores at least as high, and every other
+    place takes the next old score."""
+    c = tl.arange(0, CAP_P)
+    if ROOTED:
+        old = tl.where(c == 0, root_score, 0.0)
+    else:
+        old = tl.load(old_ptr + c, mask=c < CAP, other=0.0)
+    e = tl.arange(0, K_P)
+    place = e + tl.sum(((old[None, :] >= top[:, None]) & (c[None, :] < CAP)).to(tl.int32), axis=1)
+    j = tl.arange(0, J_P)[:, None]
+    q = tl.arange(0, V_P)[None, :]
+    placed = tl.zeros([J_P, V_P], dtype=tl.int32)  # top's scores placed before q
+    joined = tl.zeros([J_P, V_P], dtype=tl.float32)
+    is_top = placed != 0
+    for i in tl.static_range(K):
+        at = tl.sum(tl.where(e == i, place, 0))
+        score = tl.sum(tl.where(e == i, top, 0.0))
+        used = i < j
+        placed += (used & (at < q)).to(tl.int32)
+        here = used & (at == q)
+        is_top |= here
+        joined = tl.where(here, score, joined)
+    src = q - placed
+    if ROOTED:
+        old_q = tl.where(src == 0, root_score, 0.0)
+    else:
+        old_q = tl.load(old_ptr + src, mask=src < CAP, other=0.0)
+    return tl.cumsum(tl.where(is_top, joined, old_q), axis=1)
+
+
+@triton.jit
+def _store_sums(sums, row_ptr, K: tl.constexpr, J_P: tl.constexpr, V, V_P: tl.constexpr):
+    j = tl.arange(0, J_P)[:, None]
+    q = tl.arange(0, V_P)[None, :]
+    tl.store(row_ptr + q * (K + 1) + j, sums, mask=(j <= K) & (q < V))
+
+
+@triton.jit
+def _batch_mean(rows_ptr, out_ptr, done_ptr, bs, N, N_P: tl.constexpr, ROWS: tl.constexpr):
+    """The program that stores its row last averages the ``bs`` rows of ``N`` floats into ``out_ptr``, in row order
+    whichever program that is, and resets the count for the next launch."""
+    tl.debug_barrier()  # every thread's part of this row is stored
+    if tl.atomic_add(done_ptr, 1, sem="acq_rel", scope="gpu") == bs - 1:
+        i = tl.arange(0, N_P)
+        total = tl.zeros([N_P], dtype=tl.float32)
+        for r0 in tl.range(0, bs, ROWS, num_stages=2):
+            r = r0 + tl.arange(0, ROWS)[:, None]
+            rows = tl.load(rows_ptr + r * N + i[None, :], mask=(r < bs) & (i[None, :] < N), other=0.0,
+                           cache_modifier=".cg")
+            total += tl.sum(rows, axis=0)
+        tl.store(out_ptr + i, total / bs, mask=i < N)
+        tl.store(done_ptr, 0)
+
+
+@triton.jit
+def _copy_rows(src_ptr, src_rows, src_stride, dst_ptr, dst_rows, dst_stride, ok, H, part, chunk,
+               BLOCK_H: tl.constexpr):
+    """Columns ``[chunk * part, + chunk)`` of the rows ``src_rows`` into the rows ``dst_rows``."""
+    lo = part * chunk
+    for h0 in range(lo, tl.minimum(lo + chunk, H), BLOCK_H):
+        h = h0 + tl.arange(0, BLOCK_H)
+        hm = ok[:, None] & (h[None, :] < H)
+        rows = tl.load(src_ptr + src_rows[:, None] * src_stride + h[None, :], mask=hm)
+        tl.store(dst_ptr + dst_rows[:, None] * dst_stride + h[None, :], rows, mask=hm)
+
+
+@triton.jit
+def _layer_top(fs, probs_ptr, probs_stride, b, K: tl.constexpr, K_P: tl.constexpr, KK_P: tl.constexpr):
+    """The layer's scores ``fs * prob`` and the keys of its top K."""
+    n = tl.arange(0, KK_P)
+    valid = n < K * K
+    p = tl.load(probs_ptr + (b * K + n // K) * probs_stride + n % K, mask=valid, other=0.0).to(tl.float32)
+    layer = fs * p
+    # Non-negative fp32 bits order like the values; the low word breaks ties toward the lower node.
+    key = (layer.to(tl.int32, bitcast=True).to(tl.int64) << 32) | (KK_P - 1 - n).to(tl.int64)
+    return layer, tl.topk(tl.where(valid, key, -1), K_P)
+
+
+@triton.jit
+def _tree_step_merge_kernel(
+    front_scores_ptr,  # [bs, K] fp32, read then overwritten
+    layer,  # probs [bs * K, K], tokens [bs * K, K] int64, hidden [bs * K, H]: as _tree_step_kernel's
+    tree,  # as _tree_step_kernel's, then the batch mean's: delta rows [bs, V, K + 1] fp32, the count [1] int32
+    layer_strides,  # row strides of probs, tokens, hidden
+    tree_strides,  # row strides of scores, node_tokens, parents, front_hidden, best
+    H,
+    chunk,  # hidden columns a copier copies
+    start,
+    pstart,
+    fstart,  # the frontier's column in parents
+    bs,
+    V,
+    K: tl.constexpr,
+    K_P: tl.constexpr,
+    KK_P: tl.constexpr,
+    D: tl.constexpr,
+    D_P: tl.constexpr,
+    CAP: tl.constexpr,
+    CAP_P: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    COPIERS: tl.constexpr,  # programs 1.. of a row copy its hidden rows (else program 0 does)
+    DELTAS: tl.constexpr,
+    MEAN: tl.constexpr,  # several rows: each stores its deltas in a delta row, the last one stores their mean
+    J_P: tl.constexpr,
+    V_P: tl.constexpr,
+    N_P: tl.constexpr,
+    ROWS: tl.constexpr,
+):
+    probs_ptr, tokens_ptr, hidden_ptr = layer
+    (scores_ptr, node_tokens_ptr, parents_ptr, front_tokens_ptr, front_hidden_ptr, ancestors_ptr, best_ptr,
+     best_prev_ptr, layer_top_ptr, deltas_ptr, delta_rows_ptr, done_ptr) = tree
+    probs_stride, tokens_stride, hidden_stride = layer_strides
+    scores_stride, node_tokens_stride, parents_stride, front_hidden_stride, best_stride = tree_strides
+    b = tl.program_id(0).to(tl.int64)
+    n = tl.arange(0, KK_P)
+    valid = n < K * K
+    r = tl.arange(0, K_P)
+    r_ok = r < K
+    if COPIERS:
+        if tl.program_id(1) > 0:
+            # A copier reads the frontier's scores where this launch writes nothing: at its nodes (front_scores, which
+            # program 0 overwrites, holds the same bits).
+            node = tl.load(parents_ptr + b * parents_stride + fstart + n // K, mask=valid, other=0)
+            fs = tl.load(scores_ptr + b * scores_stride + node, mask=valid, other=0.0)
+            _, top_key = _layer_top(fs, probs_ptr, probs_stride, b, K, K_P, KK_P)
+            lane = (KK_P - 1 - (top_key & 0xFFFFFFFF)) // K
+            _copy_rows(hidden_ptr, b * K + lane, hidden_stride, front_hidden_ptr, b * K + r, front_hidden_stride, r_ok,
+                       H, tl.program_id(1) - 1, chunk, BLOCK_H)
+            return
+    # ---- every read of in-place buffers first
+    fs = tl.load(front_scores_ptr + b * K + n // K, mask=valid, other=0.0)
+    layer, top_key = _layer_top(fs, probs_ptr, probs_stride, b, K, K_P, KK_P)
+    row = b * K + n // K
+    tok = tl.load(tokens_ptr + row * tokens_stride + n % K, mask=valid, other=0)
+    pick = KK_P - 1 - (top_key & 0xFFFFFFFF)
+    top = (top_key >> 32).to(tl.int32).to(tl.float32, bitcast=True)
+    lane = pick // K
+    d = tl.arange(0, D_P)
+    anc_mask = r_ok[:, None] & (d[None, :] < D)
+    anc = tl.load(ancestors_ptr + (b * K + lane)[:, None] * D + d[None, :], mask=anc_mask, other=0)
+    front_tok = tl.load(tokens_ptr + (b * K + lane) * tokens_stride + pick % K, mask=r_ok, other=0)
+    # The new best set, the top CAP of the old set and the layer: a layer score lands after the old scores at least as
+    # high and the layer's higher ones (ties to the lower node); every other place takes the next old score.
+    best_row = best_ptr + b * best_stride
+    c = tl.arange(0, CAP_P)
+    old_best = tl.load(best_row + c, mask=c < CAP, other=0.0)
+    over_old = tl.sum(((old_best[None, :] >= layer[:, None]) & (c[None, :] < CAP)).to(tl.int32), axis=1)
+    ahead = (layer[None, :] > layer[:, None]) | ((layer[None, :] == layer[:, None]) & (n[None, :] < n[:, None]))
+    place = tl.where(valid, over_old + tl.sum((ahead & valid[None, :]).to(tl.int32), axis=1), CAP_P)
+    placed = tl.sum((place[None, :] < c[:, None]).to(tl.int32), axis=1)
+    here = place[None, :] == c[:, None]
+    from_layer = tl.sum(tl.where(here, layer[None, :], 0.0), axis=1)
+    from_old = tl.load(best_row + c - placed, mask=c < CAP, other=0.0)
+    new_best = tl.where(tl.max(here.to(tl.int32), axis=1) > 0, from_layer, from_old)
+    if DELTAS:
+        sums = _merged_sums(best_row, 0.0, top, K, K_P, CAP, CAP_P, J_P, V_P, False)
+    tl.debug_barrier()
+    # ---- writes
+    tl.store(scores_ptr + b * scores_stride + start + n, layer, mask=valid)
+    tl.store(node_tokens_ptr + b * node_tokens_stride + start + n, tok, mask=valid)
+    tl.store(parents_ptr + b * parents_stride + pstart + r, pick + start, mask=r_ok)
+    tl.store(front_scores_ptr + b * K + r, top, mask=r_ok)
+    tl.store(layer_top_ptr + b * K + r, top, mask=r_ok)
+    tl.store(front_tokens_ptr + b * K + r, front_tok, mask=r_ok)
+    tl.store(ancestors_ptr + (b * K + r)[:, None] * D + d[None, :], anc, mask=anc_mask)
+    tl.store(best_prev_ptr + b * best_stride + c, old_best, mask=c < CAP)
+    tl.store(best_row + c, new_best, mask=c < CAP)
+    if not COPIERS:
+        _copy_rows(hidden_ptr, b * K + lane, hidden_stride, front_hidden_ptr, b * K + r, front_hidden_stride, r_ok, H,
+                   0, chunk, BLOCK_H)
+    if DELTAS:
+        if MEAN:
+            _store_sums(sums, delta_rows_ptr + b * V * (K + 1), K, J_P, V, V_P)
+            _batch_mean(delta_rows_ptr, deltas_ptr, done_ptr, bs, V * (K + 1), N_P, ROWS)
+        else:
+            _store_sums(sums, deltas_ptr, K, J_P, V, V_P)
+
+
+@triton.jit
+def _tree_begin_merge_kernel(
+    root,  # probs [bs, K] fp32, tokens [bs, K] int64, hidden [bs, H]: as _tree_begin_kernel's
+    tree,  # as _tree_begin_kernel's, then deltas [V, K + 1], delta rows [bs, V, K + 1] fp32, the count [1] int32
+    root_hidden_stride,
+    tree_strides,  # row strides of scores, node_tokens, front_hidden, best
+    H,
+    chunk,  # hidden columns a program copies
+    root_score,
+    bs,
+    V,
+    K: tl.constexpr,
+    K_P: tl.constexpr,
+    CAP: tl.constexpr,
+    CAP_P: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    COPIERS: tl.constexpr,
+    DELTAS: tl.constexpr,
+    MEAN: tl.constexpr,
+    J_P: tl.constexpr,
+    V_P: tl.constexpr,
+    N_P: tl.constexpr,
+    ROWS: tl.constexpr,
+):
+    root_probs_ptr, root_tokens_ptr, root_hidden_ptr = root
+    (scores_ptr, node_tokens_ptr, front_scores_ptr, front_tokens_ptr, front_hidden_ptr, best_ptr, best_prev_ptr,
+     layer_top_ptr, deltas_ptr, delta_rows_ptr, done_ptr) = tree
+    scores_stride, node_tokens_stride, front_hidden_stride, best_stride = tree_strides
+    b = tl.program_id(0).to(tl.int64)
+    n = tl.arange(0, K_P)
+    valid = n < K
+    if COPIERS:
+        if tl.program_id(1) > 0:
+            _copy_rows(root_hidden_ptr, b + 0 * n, root_hidden_stride, front_hidden_ptr, b * K + n,
+                       front_hidden_stride, valid, H, tl.program_id(1) - 1, chunk, BLOCK_H)
+            return
+    else:
+        _copy_rows(root_hidden_ptr, b + 0 * n, root_hidden_stride, front_hidden_ptr, b * K + n, front_hidden_stride,
+                   valid, H, 0, chunk, BLOCK_H)
+    p = tl.load(root_probs_ptr + b * K + n, mask=valid, other=0.0)
+    key = (p.to(tl.int32, bitcast=True).to(tl.int64) << 32) | (K_P - 1 - n).to(tl.int64)
+    top_key = tl.topk(tl.where(valid, key, -1), K_P)  # descending, ties to the lower index
+    pick = K_P - 1 - (top_key & 0xFFFFFFFF)
+    top = (top_key >> 32).to(tl.int32).to(tl.float32, bitcast=True)
+    tok = tl.load(root_tokens_ptr + b * K + pick, mask=valid, other=0)
+    tl.store(scores_ptr + b * scores_stride + n, top, mask=valid)
+    tl.store(node_tokens_ptr + b * node_tokens_stride + n, tok, mask=valid)
+    tl.store(front_scores_ptr + b * K + n, top, mask=valid)
+    tl.store(layer_top_ptr + b * K + n, top, mask=valid)
+    tl.store(front_tokens_ptr + b * K + n, tok, mask=valid)
+    # best: the root, then the layer (sorted); best_prev: the root alone
+    m = tl.arange(0, CAP_P)
+    first = tl.sum(tl.where((n[None, :] == m[:, None] - 1) & valid[None, :], top[None, :], 0.0), axis=1)
+    tl.store(best_prev_ptr + b * best_stride + m, tl.where(m == 0, root_score, 0.0), mask=m < CAP)
+    tl.store(best_ptr + b * best_stride + m, tl.where(m == 0, root_score, first), mask=m < CAP)
+    if DELTAS:
+        sums = _merged_sums(best_prev_ptr, root_score, top, K, K_P, CAP, CAP_P, J_P, V_P, True)
+        if MEAN:
+            _store_sums(sums, delta_rows_ptr + b * V * (K + 1), K, J_P, V, V_P)
+            _batch_mean(delta_rows_ptr, deltas_ptr, done_ptr, bs, V * (K + 1), N_P, ROWS)
+        else:
+            _store_sums(sums, deltas_ptr, K, J_P, V, V_P)
+
+
+def _mean_meta(tree, bs: int) -> dict:
+    k, v = tree.shape.top_k, tree.max_verify
+    return dict(MEAN=bs > 1, J_P=triton.next_power_of_2(k + 1), V_P=triton.next_power_of_2(v),
+                N_P=triton.next_power_of_2(v * (k + 1)), ROWS=min(triton.next_power_of_2(bs), MERGE["rows"]),
+                BLOCK_H=MERGE["block_h"], num_warps=MERGE["warps"])
+
+
+def _copy_grid(bs: int, h: int) -> Tuple[Tuple[int, int], int, bool]:
+    """``(grid, chunk, copiers)``: a few rows copy their hidden rows in copier programs, a chunk of columns each, as
+    many as fill the GPU; many rows copy them in their own program."""
+    block = MERGE["block_h"]
+    split = min(triton.cdiv(h, block), MERGE["programs"] // bs)
+    if split < 2:
+        return (bs, 1), max(triton.cdiv(h, block), 1) * block, False
+    chunk = triton.cdiv(triton.cdiv(h, split), block) * block
+    return (bs, 1 + triton.cdiv(h, chunk)), chunk, True
+
+
+MERGE = dict(rows=64, block_h=1024, warps=4, programs=128)  # the merge kernels' launch
+
+
+def _tree_step_merge(tree, bs, step, probs, tokens, hidden, deltas):
+    shape = tree.shape
+    k = shape.top_k
+    depth = tree.ancestors.shape[-1]
+    grid, chunk, copiers = _copy_grid(bs, hidden.shape[1])
+    _tree_step_merge_kernel[grid](
+        tree.front_scores,
+        (probs, tokens, hidden),
+        (tree.scores, tree.tokens, tree.parents, tree.front_tokens, tree.front_hidden, tree.ancestors, tree.best,
+         tree.best_prev, tree.layer_top, tree.deltas[step], tree.delta_rows, tree.delta_count),
+        (probs.stride(0), tokens.stride(0), hidden.stride(0)),
+        (tree.scores.stride(0), tree.tokens.stride(0), tree.parents.stride(0), tree.front_hidden.stride(0),
+         tree.best.stride(0)),
+        hidden.shape[1],
+        chunk,
+        shape.layer_start(step + 1),
+        shape.num_parents(step + 1),
+        1 if step == 1 else shape.num_parents(step),
+        bs,
+        tree.max_verify,
+        K=k,
+        K_P=max(triton.next_power_of_2(k), 2),  # tl.topk needs k >= 2; the lanes past K are masked
+        KK_P=max(triton.next_power_of_2(k * k), 2),
+        D=depth,
+        D_P=triton.next_power_of_2(depth),
+        CAP=shape.work_cap,
+        CAP_P=triton.next_power_of_2(shape.work_cap),
+        COPIERS=copiers,
+        DELTAS=deltas,
+        **_mean_meta(tree, bs),
+    )
+
+
+def _tree_begin_merge(tree, bs, root_score, deltas):
+    shape = tree.shape
+    k = shape.top_k
+    hidden = tree.root_hidden
+    grid, chunk, copiers = _copy_grid(bs, hidden.shape[1])
+    _tree_begin_merge_kernel[grid](
+        (tree.root_probs, tree.root_tokens, hidden),
+        (tree.scores, tree.tokens, tree.front_scores, tree.front_tokens, tree.front_hidden, tree.best, tree.best_prev,
+         tree.layer_top, tree.deltas[0], tree.delta_rows, tree.delta_count),
+        hidden.stride(0),
+        (tree.scores.stride(0), tree.tokens.stride(0), tree.front_hidden.stride(0), tree.best.stride(0)),
+        hidden.shape[1],
+        chunk,
+        root_score,
+        bs,
+        tree.max_verify,
+        K=k,
+        K_P=triton.next_power_of_2(k),
+        CAP=shape.work_cap,
+        CAP_P=triton.next_power_of_2(shape.work_cap),
+        COPIERS=copiers,
+        DELTAS=deltas,
+        **_mean_meta(tree, bs),
+    )
+
+
+def set_step_slots(tree, bs: int, step: int, slots: torch.Tensor) -> None:
+    """:meth:`DraftTree.set_step_slots` on CUDA: the treestep version casts and writes the column in one copy."""
+    if variant.current == TREESTEP:
+        tree.ancestors[:bs, :, step - 1].copy_(slots)
+    else:
+        tree.ancestors[:bs, :, step - 1] = slots.to(torch.int32)

@@ -26,13 +26,16 @@ from __future__ import annotations
 
 import functools
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import triton
 import triton.language as tl
 
+from eagle_harness.kernels import variant
 from eagle_harness.kernels.online_softmax import online_block
+
+ROWATTN = variant.name("rowattn")
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,14 @@ class RowsLaunch:
     block_n: int
     num_warps: int = 4
     num_stages: int = 3
+
+
+# The rowattn version (tuned on H200, 132 SMs): a draft step's key splits from its own launch's (request, head)
+# programs, the power of two nearest STEP_WAVES waves of them, where the caller's launch may size them for a batch of
+# one; at most STEP.splits (more leave splits of a 4096 window without keys), on STEP's tile. Only the real rows'
+# parts stored.
+STEP_WAVES = 4.0
+STEP = RowsLaunch(splits=64, block_n=32, num_warps=2, num_stages=3)
 
 
 def rows_padded(rows_per_request: int) -> int:
@@ -111,6 +122,7 @@ def _rows_attention_kernel(
     ANC_P: tl.constexpr,
     NUM_SPLITS: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    COMPACT: tl.constexpr,  # store the real rows' parts only, and of a split without keys only its lse
 ):
     b = tl.program_id(0)
     h = tl.program_id(1)
@@ -132,6 +144,7 @@ def _rows_attention_kernel(
     m = tl.full((ROWS_P,), float("-inf"), tl.float32)
     denom = tl.zeros((ROWS_P,), tl.float32)
     acc = tl.zeros((ROWS_P, HEAD_DIM), tl.float32)
+    stored = row_ok  # COMPACT's out rows
     if split < NUM_SPLITS:
         if EXTEND:
             first = tl.min(tl.where(row_ok, lo, 2147483647), 0)
@@ -146,6 +159,7 @@ def _rows_attention_kernel(
         per_split = tl.cdiv(tl.cdiv(last + 1 - first, NUM_SPLITS), BLOCK_N) * BLOCK_N
         start = first + split * per_split
         end = tl.minimum(start + per_split, last + 1)
+        stored = stored & (start < end)
         for block in range(start, end, BLOCK_N):
             p = block + tl.arange(0, BLOCK_N)
             in_range = p < end
@@ -166,8 +180,14 @@ def _rows_attention_kernel(
     part_out, part_lse = parts
     part = ((b * num_heads + h) * (NUM_SPLITS + 1) + split) * ROWS_P + r
     denom_safe = tl.maximum(denom, 1e-30)
-    tl.store(part_lse + part, tl.where(denom > 0, m + tl.log2(denom_safe), float("-inf")))
-    tl.store(part_out + part[:, None] * HEAD_DIM + d[None, :], acc / denom_safe[:, None])
+    lse = tl.where(denom > 0, m + tl.log2(denom_safe), float("-inf"))
+    out = acc / denom_safe[:, None]
+    if COMPACT:
+        tl.store(part_lse + part, lse, mask=row_ok)
+        tl.store(part_out + part[:, None] * HEAD_DIM + d[None, :], out, mask=stored[:, None])
+    else:
+        tl.store(part_lse + part, lse)
+        tl.store(part_out + part[:, None] * HEAD_DIM + d[None, :], out)
 
 
 @triton.jit
@@ -182,6 +202,7 @@ def _merge_splits_kernel(
     SPLITS: tl.constexpr,
     SPLITS_P: tl.constexpr,
     NUM_SPLITS: tl.constexpr,
+    COMPACT: tl.constexpr,  # a split whose lse is -inf stored no out
 ):
     row = tl.program_id(0)
     h = tl.program_id(1)
@@ -194,9 +215,22 @@ def _merge_splits_kernel(
     lse = tl.load(part_lse + part, mask=used, other=float("-inf"))
     top = tl.max(lse, 0)
     weight = tl.where(lse == float("-inf"), 0.0, tl.exp2(lse - top))
-    parts_d = tl.load(part_out + part[:, None] * HEAD_DIM + d[None, :], mask=used[:, None], other=0.0)
+    seen = used & (lse > float("-inf")) if COMPACT else used
+    parts_d = tl.load(part_out + part[:, None] * HEAD_DIM + d[None, :], mask=seen[:, None], other=0.0)
     merged = tl.sum(weight[:, None] * parts_d, 0) / tl.sum(weight, 0)
     tl.store(out + row * stride_o_row + h * stride_o_head + d, merged.to(out.dtype.element_ty))
+
+
+@functools.cache
+def _sms(device: torch.device) -> int:
+    return torch.cuda.get_device_properties(device).multi_processor_count if device.type == "cuda" else 4
+
+
+def step_splits(programs: int, device: torch.device) -> int:
+    """The rowattn version's key splits of a draft step of ``programs`` (request, head) programs per split: a power of
+    two, the nearest in log scale to STEP_WAVES waves (rounding up instead over-splits 40 heads x 3 requests by 7.3
+    waves, +10% at a full window)."""
+    return 1 << max(0, round(math.log2(STEP_WAVES * _sms(device) / programs)))
 
 
 def _kv_strides(cache: torch.Tensor) -> tuple:
@@ -245,9 +279,13 @@ def rows_attention(
     extend = step == 0
     max_depth = 1 if extend else ancestors.shape[-1]
     rows_p = rows_padded(rows_per_request)
+    bs = rows // rows_per_request
+    tuned = variant.current == ROWATTN
+    if tuned and not extend:  # no more splits than the caller sized the parts for
+        launch = replace(STEP, splits=min(step_splits(bs * heads, q.device), STEP.splits, launch.splits))
     splits = launch.splits + (0 if extend else 1)
     parts = (part_out, part_lse)
-    _rows_attention_kernel[(rows // rows_per_request, heads, splits)](
+    _rows_attention_kernel[(bs, heads, splits)](
         q,
         (keys, values),
         parts,
@@ -271,6 +309,7 @@ def rows_attention(
         ANC_P=rows_padded(rows_per_request * max_depth),
         NUM_SPLITS=launch.splits,
         BLOCK_N=launch.block_n,
+        COMPACT=tuned,
         num_warps=launch.num_warps,
         num_stages=launch.num_stages,
     )
@@ -285,4 +324,5 @@ def rows_attention(
         SPLITS=splits,
         SPLITS_P=triton.next_power_of_2(splits),
         NUM_SPLITS=launch.splits,
+        COMPACT=tuned,
     )

@@ -19,6 +19,10 @@ import torch
 import triton
 import triton.language as tl
 
+from eagle_harness.kernels import variant
+
+GATHERDOT = variant.name("gatherdot")
+
 
 class _Tiles(NamedTuple):
     block_k: int
@@ -36,6 +40,23 @@ def _tiles(rows: int) -> _Tiles:
     if rows <= 32:
         return _Tiles(2, 2048, 2, 3)
     return _Tiles(2, 1024, 2, 3)
+
+
+def _tiles_hopper(rows: int) -> _Tiles:
+    # Up to 12 rows the launch is latency-bound: one candidate per program, its whole row in one masked tile (no H
+    # loop, every byte in flight at once), 1.2-1.9x the B300 table. 1024-wide tiles divide H = 5120 up to 32 rows;
+    # beyond, more candidates per one-warp program as rows grow. Swept on H200 (248320 / TP x 5120 bf16, 1-2048 rows).
+    if rows <= 4:
+        return _Tiles(1, 8192, 8, 1)
+    if rows <= 12:
+        return _Tiles(1, 8192, 4, 1)
+    if rows <= 32:
+        return _Tiles(1, 1024, 2, 1)
+    if rows <= 64:
+        return _Tiles(2, 512, 1, 3)
+    if rows <= 256:
+        return _Tiles(4, 512, 1, 3)
+    return _Tiles(8, 512, 1, 2)
 
 
 @triton.jit
@@ -120,7 +141,7 @@ def _launch(
 ) -> None:
     rows, k = indices.shape
     h = weight.shape[1]
-    tiles = _tiles(rows)
+    tiles = _tiles_hopper(rows) if variant.current == GATHERDOT else _tiles(rows)
     _gather_dot_kernel[(rows, triton.cdiv(k, tiles.block_k))](
         weight, indices, hidden, output,
         weight.stride(0), weight.stride(1), indices.stride(0), indices.stride(1),

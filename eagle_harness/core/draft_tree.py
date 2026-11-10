@@ -157,6 +157,7 @@ class DraftTree:
         self.decay = shape.decay(device)
         self.deltas = torch.zeros(shape.max_depth, max_verify, k + 1, dtype=f32, device=device)
         self.delta_rows = torch.zeros(max_bs, max_verify, k + 1, dtype=f32, device=device)  # per-row deltas (kernel)
+        self.delta_count = torch.zeros(1, dtype=torch.int32, device=device)  # rows stored so far (treestep kernels)
         self._extra_mask = self._delta_mask(device)
         # verify_rows: the select kernel's per-node row scratch, and the torch path's layer tables
         self._row_of = torch.empty(max_bs * _next_power_of_2(shape.capacity), dtype=torch.int32, device=device)
@@ -176,16 +177,16 @@ class DraftTree:
                 dst[:bs].copy_(src)
 
     def begin(self, bs: int) -> None:
-        """Seed depth 1 from the root buffers (``[bs, K]`` probabilities / ids, ``[bs, H]`` hidden)
-        (one Triton launch on CUDA, :meth:`begin_reference` elsewhere)."""
+        """Seed depth 1 from the root buffers (``[bs, K]`` probabilities / ids, ``[bs, H]`` hidden), and the work
+        deltas of slot 0 (Triton on CUDA, :meth:`begin_reference` and :meth:`_store_deltas_reference` elsewhere)."""
         if self.root_probs.is_cuda:
             from eagle_harness.kernels.tree_step import tree_begin
 
-            tree_begin(self, bs, ROOT_SCORE)
+            tree_begin(self, bs, ROOT_SCORE, deltas=0 in self.delta_slots)
         else:
             self.begin_reference(bs)
-        if 0 in self.delta_slots:
-            self._store_deltas(bs, 0)
+            if 0 in self.delta_slots:
+                self._store_deltas_reference(bs, 0)
 
     def begin_reference(self, bs: int) -> None:
         """:meth:`begin` without the work deltas, in torch (CPU, and the reference of the CUDA kernel)."""
@@ -206,7 +207,12 @@ class DraftTree:
 
     def set_step_slots(self, bs: int, step: int, slots: torch.Tensor) -> None:
         """Record the draft KV slots ``[bs, K]`` the depth-``step`` frontier writes."""
-        self.ancestors[:bs, :, step - 1] = slots.to(torch.int32)
+        if slots.is_cuda:
+            from eagle_harness.kernels.tree_step import set_step_slots
+
+            set_step_slots(self, bs, step, slots)
+        else:
+            self.ancestors[:bs, :, step - 1] = slots.to(torch.int32)
 
     def keep_rows(self, rows: torch.Tensor) -> None:
         """Keep the requests at batch positions ``rows`` (in that order) as rows ``0..len(rows)-1``: a drafted tree
@@ -234,7 +240,7 @@ class DraftTree:
         else:
             self.step_reference(bs, step, probs, tokens, hidden)
             if step in self.delta_slots:
-                self._store_deltas(bs, step)
+                self._store_deltas_reference(bs, step)
 
     def step_reference(
         self, bs: int, step: int, probs: torch.Tensor, tokens: torch.Tensor, hidden: torch.Tensor
@@ -267,18 +273,9 @@ class DraftTree:
         k = self.shape.top_k
         return (torch.arange(k).view(1, -1) < torch.arange(k + 1).view(-1, 1)).float().to(device)
 
-    def _store_deltas(self, bs: int, slot: int) -> None:
-        """Compute work deltas on the newest layer, for every verify budget ``v`` (one Triton
-        launch on CUDA, :meth:`_store_deltas_reference` elsewhere)."""
-        if self.deltas.is_cuda:
-            from eagle_harness.kernels.tree_step import work_deltas
-
-            work_deltas(self, bs, slot)
-        else:
-            self._store_deltas_reference(bs, slot)
-
     def _store_deltas_reference(self, bs: int, slot: int) -> None:
-        """The torch version of :meth:`_store_deltas`.
+        """The work deltas of the newest layer, for every verify budget ``v``, in torch (CPU, and the reference of
+        the CUDA kernels).
 
         Sum the top ``min(n0 + j, v)`` of the merge of the best set
         before the layer (``n0 = min(v, count)`` nodes, ``count``: tree size
