@@ -19,7 +19,7 @@ from __future__ import annotations
 import enum
 import math
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 
 from eagle_harness.core.cost_table import BatchCostTable
@@ -287,10 +287,11 @@ class CostModel:
         self._history = [[self.verify_num] * 16 for _ in range(self.max_batch_size)]
 
     # ------------------------------------------------------------------ tables
-    def set_tables(self, tables: dict[int, BatchCostTable]) -> None:
-        """Replace the cost tables (live costs refresh them between rounds); history and state are kept."""
+    def set_tables(self, tables: dict[int, BatchCostTable], refused: Iterable[int] = ()) -> None:
+        """Replace the cost tables (live costs refresh them between rounds); history and state are kept. A batch size
+        is priced from the nearest table not ``refused`` (tables whose costs the model's checks reject)."""
         self.tables = tables
-        measured = sorted(tables)
+        measured = sorted(set(tables) - set(refused))
         self._bs_lut = (
             [0] + [nearest_cost_batch_size(bs, measured) for bs in range(1, self.max_batch_size + 1)]
             if measured

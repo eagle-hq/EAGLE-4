@@ -481,7 +481,7 @@ def test_a_bucket_the_cost_model_refuses_keeps_the_fixed_shape(caplog):
     drafter, _ = _sequenced(True, stop=0)
     drafter._unpriced = set()
     with caplog.at_level("WARNING"):
-        drafter._check_priced(1)  # the model has no table for bucket 1
+        drafter._check_priced(1, None)  # the model has no table for bucket 1
     assert drafter._unpriced == {1} and "keeps the fixed draft shape" in caplog.text
 
 
@@ -536,6 +536,21 @@ def test_a_bucket_between_seeded_buckets_serves_the_cost_model_without_a_seed_sw
         drafter._begin_round(batch)
     assert drafter.policy(4) is drafter.fixed and drafter.fixed.force_width == 1
     assert drafter._seeding == (4, 100) and drafter.round_timer is drafter.timer
+
+
+def test_a_batch_size_is_never_priced_from_a_refused_table_nearer_than_its_own_bucket():
+    """TP8 at 13 requests: bucket 16 is priced, but the cost model's nearest table is bucket 12's, whose draft step
+    measured 2 ms (ratio below 5); serving it raised in draft_cost_row and killed the server."""
+    from eagle_harness.core.live_costs import DRAFT_WIDTH
+
+    drafter = _live_drafter(seeded=(8, 12, 16))
+    drafter.live.cells[(12, DRAFT_WIDTH, 0)].us = 2000.0
+    drafter._bucket = lambda bs: next(b for b in (8, 12, 16) if b >= bs)
+    drafter._rounds = 0
+    drafter._begin_round(SimpleNamespace(reqs=[None] * 13, seq_lens_cpu=torch.tensor([100] * 13)))
+    assert drafter._unpriced == {12} and drafter.policy(13) is drafter.cost
+    assert drafter.cost.table(13) is drafter.cost.tables[16]
+    drafter.cost.draft_cost_row(13, 100)
 
 
 def test_a_bucket_outside_the_seeded_ones_is_seeded_on_its_first_round():

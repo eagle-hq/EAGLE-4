@@ -40,7 +40,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.speculative.eagle_worker_common import build_eagle_verify_input
 
 from eagle_harness.core.cost_model import CostModel, DraftCostRow, FixedShapePolicy, WidthStep
-from eagle_harness.core.cost_table import cost_model_problem
+from eagle_harness.core.cost_table import BatchCostTable, cost_model_problem
 from eagle_harness.core.draft_tree import DraftTree, VerifySelection
 from eagle_harness.core.live_costs import DRAFT_WIDTH, LiveCosts
 from eagle_harness.kernels import arch
@@ -358,9 +358,11 @@ class DynamicDrafter:
             if self._sync_cells is not None:
                 self.live.cells = self._sync_cells(self.live.cells)
             # Every bucket served so far keeps its table, interpolated ones included (they have no cells).
-            self.cost.set_tables(self.live.tables(also=tuple(self._visits)))
-            for measured_bucket in self.cost.tables:
-                self._check_priced(measured_bucket)
+            tables = self.live.tables(also=tuple(self._visits))
+            for measured_bucket, table in tables.items():
+                self._check_priced(measured_bucket, table)
+            # A batch size is priced from the nearest table, not always its own bucket's: never from a refused one.
+            self.cost.set_tables(tables, refused=self._unpriced)
             if self._save_cells is not None and (seeding or self._rounds % (LIVE_REFRESH_ROUNDS * LIVE_SAVE_REFRESHES) == 0):
                 self._save_cells()
             if seeding and ready:
@@ -374,9 +376,8 @@ class DynamicDrafter:
         self._interpolated = interpolated
         self._seeding = None if ready or interpolated else (bucket, self.average_context(batch))
 
-    def _check_priced(self, bucket: int) -> None:
+    def _check_priced(self, bucket: int, table: Optional[BatchCostTable]) -> None:
         """Keep the fixed shape at a bucket whose measured costs the cost model refuses (its ratio sanity checks)."""
-        table = self.cost.tables.get(bucket)
         problem = "no table" if table is None else cost_model_problem(table, target_is_moe=self.cost.target_is_moe)
         if problem is None:
             self._unpriced.discard(bucket)
