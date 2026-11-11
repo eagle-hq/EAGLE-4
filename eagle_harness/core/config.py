@@ -254,7 +254,8 @@ def parse_harness_config(value: Optional[str], *, default_data_path: Optional[st
         return harness_config_from_dict({} if default_data_path is None else {"data_path": default_data_path})
     text = value.strip()
     if not text.startswith(("{", "[")):
-        with open(os.path.expanduser(text), encoding="utf-8") as f:
+        # utf-8-sig also reads a file that an editor saved with a byte order mark.
+        with open(os.path.expanduser(text), encoding="utf-8-sig") as f:
             text = f.read()
     try:
         data = json.loads(text)
