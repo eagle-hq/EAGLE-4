@@ -69,6 +69,8 @@ class HarnessVerifyInput(EagleVerifyInput):
 
     # A greedy round: the target returns the rows' argmax, not their logits.
     greedy_tokens_only: bool = False
+    # A captured graph's output (VerifyTail): every tensor is a static buffer the graph rewrites each round.
+    captured: bool = False
     # Raw draft node ids of the selected non-root rows, in verify-row order.
     proposal_nodes: Optional[torch.Tensor] = dataclasses.field(default=None, repr=False)
     # The tail-mask attention of the batch-size-1 verify graphs (set on the inputs they are captured with).

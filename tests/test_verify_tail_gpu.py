@@ -67,3 +67,43 @@ def test_replayed_ranking_and_selection_follow_the_trees_buffers(monkeypatch, bs
         assert torch.equal(got_tokens, want.draft_tokens + 1)
         assert torch.equal(got_parents, want.parent_list)
         assert (steps, got_width) == (min(depth, width - 1), width)
+
+
+def _static_shapes():
+    """(bs, depth, width) at 1-4 requests over the tree's depths and verify widths: every width the depth's nodes
+    fill (width - 1 <= ranked nodes, as the drafter's width fit keeps it)."""
+    shape = TreeShape(K, DEPTH)
+    return [
+        (bs, depth, width)
+        for bs in (1, 2, 3, 4)
+        for depth in (1, 2, 3, 6, 11)
+        for width in (2, 4, 9, 16)
+        if width - 1 <= min(shape.num_nodes(depth), 15)
+    ]
+
+
+@pytest.mark.parametrize("bs,depth,width", _static_shapes())
+def test_a_static_ranking_replays_the_selection_over_its_refilled_buffers(monkeypatch, bs, depth, width):
+    """draftmk's path (DraftmkRound.ranking): the ranking is views of its own buffers, refilled in place each round,
+    so the selection is captured over them and must follow every later round's tree and ranking."""
+    monkeypatch.setattr(verify_tail, "CAPTURE_AFTER", 1)
+    tree = _drafted_tree(bs, depth, seed=1)
+    tail = VerifyTail(tree, _build)
+    count = min(tree.shape.num_nodes(depth), 15)
+    ranked = torch.zeros(tree.max_bs, 15, dtype=torch.int64, device="cuda")  # [max_bs, rows], as DraftmkRound's
+    scores = torch.zeros(16, dtype=torch.float32, device="cuda")
+    for seed in (1, 2, 3, 4):  # eager, capture, then two replays over other trees
+        if seed > 1:
+            other = _drafted_tree(bs, depth, seed=seed)
+            for name in ("scores", "tokens", "parents"):
+                getattr(tree, name).copy_(getattr(other, name))
+        want_ranked, want_scores = tree.rank(bs, depth, count)
+        ranked[:bs, :count].copy_(want_ranked)
+        scores[: count + 1].copy_(want_scores[0] if bs == 1 else want_scores.mean(dim=0))
+        ranking = verify_tail.Ranking(ranked[:bs, :count], scores[: count + 1])
+        got_index, got_tokens, got_parents, steps, _ = tail.verify_input(bs, depth, width, ranking, static_ranking=True)
+        want = tree.select(bs, min(depth, width - 1), want_ranked, width)
+        assert torch.equal(got_index, want.top_scores_index), seed
+        assert torch.equal(got_tokens, want.draft_tokens + 1), seed
+        assert torch.equal(got_parents, want.parent_list), seed
+    assert (bs, depth, width) in tail._inputs.graphs  # the selection replayed from its graph

@@ -145,6 +145,12 @@ def gluon_gdn(device: DeviceLike = None) -> bool:
     return g is not None and g.nvidia and g.sm in GLUON_GDN_SM and unsupported_reason(device) is None
 
 
+def draftmk(device: DeviceLike = None) -> bool:
+    """The draft-round megakernel (:mod:`eagle_harness.kernels.draftmk`): its cubins are sm_103a (B300) only."""
+    g = gpu(device)
+    return g is not None and g.nvidia and g.sm == 103 and unsupported_reason(device) is None
+
+
 def _amd(device: DeviceLike) -> bool:
     g = gpu(device)
     return g is not None and not g.nvidia and unsupported_reason(device) is None

@@ -15,7 +15,7 @@ from sglang.srt.speculative.eagle_worker_common import VerifyAcceptInput  # noqa
 from eagle_harness.sglang import verify_step  # noqa: E402
 
 
-def _step_result(*, static: bool):
+def _step_result(*, static: bool, captured: bool = True):
     accepted = SimpleNamespace(
         predict=torch.tensor([5, 6]),
         accept_lens=torch.tensor([2]),
@@ -33,7 +33,9 @@ def _step_result(*, static: bool):
         tail_graphs=graphs if static else None,
         staged=staged if static else None,
     )
-    spec = SimpleNamespace(prepared_out_cache_loc=torch.zeros(16), max_tree_depth=4, draft_token=torch.zeros(16))
+    tables = {name: torch.zeros(16) for name in ("retrieve_index", "retrieve_next_token", "retrieve_next_sibling")}
+    spec = SimpleNamespace(prepared_out_cache_loc=torch.zeros(16), max_tree_depth=4, draft_token=torch.zeros(16),
+                           captured=captured, **tables)
     inp = VerifyAcceptInput(
         verify_input=spec,
         next_token_ids=torch.zeros(16),
@@ -67,3 +69,11 @@ def test_step_returns_the_accepted_path_and_the_compacted_rows(static):
     assert torch.equal(result.new_seq_lens, accepted.new_seq_lens)
     # A replayed tail's lengths are a static buffer: the scheduler gets a copy.
     assert (result.new_seq_lens is accepted.new_seq_lens) is (not static)
+
+
+def test_an_eagerly_built_verify_input_never_replays_a_tail_graph():
+    # its tensors are fresh: the allocator can give one an address a captured tail read
+    result, accepted, compacted, inp, staged, accept = _step_result(static=True, captured=False)
+    args = accept.call_args.args
+    assert args[3] is inp.seq_lens and args[5] is inp.out_cache_loc
+    assert result.new_seq_lens is accepted.new_seq_lens

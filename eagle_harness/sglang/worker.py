@@ -77,6 +77,7 @@ from eagle_harness.sglang.chain_rounds import (
 from eagle_harness.core.live_costs import CostKey, LiveCosts, config_digest
 from eagle_harness.core.gemm_solutions import load_gemm_solutions
 from eagle_harness.sglang.draft_extend import DraftExtend
+from eagle_harness.sglang.draft_round import RoundDrafter, round_backend
 from eagle_harness.sglang.draft_steps import DraftSteps
 from eagle_harness.sglang.draft_kv import StaleDraftKV, kv_only_prefill, kv_only_prefill_supported
 from eagle_harness.sglang.drafter import DynamicDrafter, PrelaunchResult, spin_wait
@@ -236,13 +237,14 @@ class HarnessDraftWorker(EagleDraftWorker):
         self.steps.capture(capture_bs)
         self.extend.capture(capture_bs)
 
-    def extend_after_verify(self, batch: "ScheduleBatch", result, width: int, staged: bool) -> None:
+    def extend_after_verify(self, batch: "ScheduleBatch", result, width: int, staged: bool, run=None) -> None:
         """The decode draft extend (its input staged first unless the verify ``staged`` it); installs the next
-        round's depth-1 candidates in ``result.next_draft_input``."""
+        round's depth-1 candidates in ``result.next_draft_input``. ``run(bs, width)`` replaces
+        :meth:`DraftExtend.run` (a round launch that also drafts, :mod:`eagle_harness.sglang.draft_round`)."""
         if not staged:
             self.extend.stage(result.next_token_ids, result.logits_output.hidden_states, result.accept_lens)
         draft_input = result.next_draft_input
-        draft_input.topk_p, draft_input.topk_index, draft_input.hidden_states = self.extend.run(
+        draft_input.topk_p, draft_input.topk_index, draft_input.hidden_states = (run or self.extend.run)(
             len(batch.seq_lens), width
         )
 
@@ -434,7 +436,14 @@ class EagleHarnessWorker(EAGLEWorkerV2):
                 native_us=None if self.live is None else lambda bs: self.live.verify_us(bucket(bs), 1),
             )
         self._chain_rounds = ChainRounds(self._chain_schedule, calibration, DynamicDrafter.average_context, policy)
-        self._drafter = DynamicDrafter(
+        backend = round_backend()
+        drafter = DynamicDrafter if backend is None else partial(
+            RoundDrafter,
+            extend=self._draft_worker.extend,
+            backend=backend,
+            check=os.environ.get("EAGLE_DRAFT_ROUND_CHECK") == "1",
+        )
+        self._drafter = drafter(
             self._draft_worker.steps,
             self.cost_model,
             fixed=self.fixed,
@@ -591,7 +600,7 @@ class EagleHarnessWorker(EAGLEWorkerV2):
             with self._draft_context(), spec_stage_span("draft_extend"):
                 prelaunch_done = self._drafter.prelaunch(
                     batch,
-                    extend=lambda: draft.extend_after_verify(batch, result, width, staged),
+                    extend=lambda run=None: draft.extend_after_verify(batch, result, width, staged, run),
                     inputs=(
                         batch.seq_lens,
                         result.next_token_ids,

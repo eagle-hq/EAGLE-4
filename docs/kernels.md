@@ -63,6 +63,22 @@ python -m eagle_harness.kernels.build prebuild --cuda-home /usr/local/cuda-13.0 
 python -m eagle_harness.kernels.build check                                       # one compile per architecture
 ```
 
+## Draft-round megakernel
+
+On B300 GPUs (sm_103) with sglang, a decode round's whole EAGLE-4 draft runs as one persistent kernel launch: the
+draft extend after verify, every draft step with the cost model's depth stop decided on the GPU, and the ranking of
+the verify set. It replaces the per-step CUDA graphs at every tensor-parallel size up to 8, for batches of up to 4
+requests; larger batches, chains and sampled trees run on the graphs. The kernel is prebuilt in the
+`eagle-harness-draftmk` wheel (Linux x86_64), a separate install that `eagle-harness` does not require, and loads
+from the first of:
+
+1. the file named by `$EAGLE_HARNESS_DRAFTMK_LIB`,
+2. the `eagle-harness-draftmk` wheel, where it is installed,
+3. none: the draft rounds run on the graphs and a log line says why.
+
+`EAGLE_DRAFT_ROUND` picks the backend: unset, the megakernel wherever it loads; `draftmk`, the megakernel or a startup
+error; `off`, the graphs.
+
 ## GDN tree verify
 
 Hybrid targets such as Qwen3.8 interleave full-attention layers with gated delta net (GDN) layers. A tree verify of a

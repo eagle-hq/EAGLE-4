@@ -150,10 +150,17 @@ def fused_accept_step(
         kv_cache = token_to_kv_pool_allocator.get_kvcache()
         req_to_token = req_to_token_pool.req_to_token
         slots = verify_input.prepared_out_cache_loc
-        static_tail = tail_graphs is not None and staged is not None and inp.can_run_cuda_graph and slots is not None
+        static_tail = (
+            tail_graphs is not None
+            and staged is not None
+            and inp.can_run_cuda_graph
+            and slots is not None
+            and getattr(verify_input, "captured", False)
+        )
         if static_tail:
-            # Every input is a static buffer: the target graph's outputs, the draft graph's verify input, the
-            # draft's staged lengths.
+            # Every input is a static buffer: the target graph's outputs, a captured verify input (an eager one is
+            # fresh tensors, whose addresses the allocator hands out again), the draft's staged lengths. The key
+            # holds every tensor the tail reads.
             seq_lens, req_pool_indices = staged
             key = (
                 num_draft_tokens,
@@ -161,8 +168,12 @@ def fused_accept_step(
                 target_tokens.data_ptr(),
                 None if hidden_states is None else hidden_states.data_ptr(),
                 verify_input.draft_token.data_ptr(),
+                verify_input.retrieve_index.data_ptr(),
+                verify_input.retrieve_next_token.data_ptr(),
+                verify_input.retrieve_next_sibling.data_ptr(),
                 slots.data_ptr(),
                 seq_lens.data_ptr(),
+                req_pool_indices.data_ptr(),
             )
             accepted, compacted = tail_graphs.run(
                 key,

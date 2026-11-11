@@ -112,6 +112,7 @@ def modules(monkeypatch):
         "verify_tail": ("VerifyTail",),
     }.items():
         stub(f"eagle_harness.sglang.{name}", **dict.fromkeys(attrs, object))
+    stub("eagle_harness.sglang.draft_round", RoundDrafter=object, round_backend=lambda: None)
     plain = load("eagle_harness.sglang.plain_decode")
     drafter = load("eagle_harness.sglang.drafter")
     worker = load("eagle_harness.sglang.worker")

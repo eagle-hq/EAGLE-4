@@ -34,6 +34,7 @@ from sglang.srt.speculative.eagle_info import EagleVerifyInput
 
 from eagle_harness.core.draft_tree import DraftTree, VerifySelection
 from eagle_harness.sglang.graph_pool import capture
+from eagle_harness.sglang.verify_input import HarnessVerifyInput
 
 # (batch size, tree selection, num_steps, num_draft_tokens) -> sglang's verify input.
 BuildInput = Callable[[int, VerifySelection, int, int], EagleVerifyInput]
@@ -76,6 +77,14 @@ class _Graphs:
         return outputs
 
 
+def _mark_captured(graphs: _Graphs, key: Tuple, verify_input: EagleVerifyInput) -> EagleVerifyInput:
+    """``verify_input``, flagged ``captured`` when it is the key's graph output (an eager build is fresh tensors)."""
+    entry = graphs.graphs.get(key)
+    if entry is not None and entry[1] is verify_input and isinstance(verify_input, HarnessVerifyInput):
+        verify_input.captured = True
+    return verify_input
+
+
 class VerifyTail:
     """Graph-replayed ranking and verify-input build of a drafted tree."""
 
@@ -90,15 +99,22 @@ class VerifyTail:
         """The best ``count`` nodes of the ``depth``-level tree and the cumulative scores of their prefixes."""
         return self._rankings.run((bs, depth), lambda: self._rank(bs, depth, count))
 
-    def verify_input(self, bs: int, depth: int, width: int, ranking: Ranking) -> EagleVerifyInput:
-        """sglang's verify input of the best ``width - 1`` ranked nodes plus the root."""
+    def verify_input(
+        self, bs: int, depth: int, width: int, ranking: Ranking, static_ranking: bool = False
+    ) -> EagleVerifyInput:
+        """sglang's verify input of the best ``width - 1`` ranked nodes plus the root. ``static_ranking``: the
+        caller's ranking lives in buffers that every round of the key rewrites in place."""
         # A graph reads the tensors it was captured with: only the ranking graph's own outputs stay current.
+        # A static ranking's graph reads width - 1 columns of its buffer, which every round must have ranked.
+        assert not static_ranking or width - 1 <= ranking.ranked.shape[1], (width, ranking.ranked.shape)
         ranked = self._rankings.graphs.get((bs, depth))
-        return self._inputs.run(
-            (bs, depth, width),
+        key = (bs, depth, width)
+        verify_input = self._inputs.run(
+            key,
             lambda: self._select(bs, depth, width, ranking),
-            static=ranked is not None and ranked[1] is ranking,
+            static=static_ranking or (ranked is not None and ranked[1] is ranking),
         )
+        return _mark_captured(self._inputs, key, verify_input)
 
     def ranked_verify_input(
         self, bs: int, depth: int, count: int, width: int, on_rank: Callable[[Ranking], None]
@@ -111,7 +127,8 @@ class VerifyTail:
             on_rank(ranking)
             return self._select(bs, depth, width, ranking)
 
-        return self._ranked_inputs.run((bs, depth, count, width), body)
+        key = (bs, depth, count, width)
+        return _mark_captured(self._ranked_inputs, key, self._ranked_inputs.run(key, body))
 
     def _rank(self, bs: int, depth: int, count: int) -> Ranking:
         ranked, scores = self.tree.rank(bs, depth, count)

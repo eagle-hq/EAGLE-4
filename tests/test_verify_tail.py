@@ -68,3 +68,20 @@ def test_a_selection_is_captured_only_over_the_ranking_graphs_outputs(monkeypatc
     assert len(captures) == 2
     tail.verify_input(2, 3, 4, eager)  # the selection graph reads the ranking graph's buffers: not these
     assert captures[1].replays == 1
+
+
+def test_only_a_graphs_own_verify_input_is_flagged_captured(monkeypatch, captures):
+    from sglang.srt.speculative.eagle_info import EagleVerifyInput
+
+    from eagle_harness.sglang.verify_input import HarnessVerifyInput
+
+    monkeypatch.setattr(verify_tail, "CAPTURE_AFTER", 1)
+    tree = SimpleNamespace(select=lambda bs, steps, ranked, width: None)
+    eagle = EagleVerifyInput.create_idle_input(topk=4, spec_steps=3, num_verify_tokens=8, device="cpu")
+    tail = verify_tail.VerifyTail(tree, lambda bs, selection, steps, width: HarnessVerifyInput.from_eagle(eagle))
+    ranking = verify_tail.Ranking(torch.zeros(1, 7, dtype=torch.int64), torch.zeros(8))
+    # the accept tail replays its graphs only over captured inputs (an eager build's addresses are handed out again)
+    assert not tail.verify_input(1, 3, 8, ranking).captured  # not the tail's ranking: eager
+    assert not tail.verify_input(1, 3, 8, ranking, static_ranking=True).captured  # first run: eager
+    assert tail.verify_input(1, 3, 8, ranking, static_ranking=True).captured  # second: the graph's output
+    assert len(captures) == 1
