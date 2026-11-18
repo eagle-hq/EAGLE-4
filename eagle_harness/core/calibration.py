@@ -417,7 +417,9 @@ def fit_model_costs(
             raise RuntimeError(f"Cache cost data for interval {interval_id} is invalid.")
         costs = [0] * len(lens)
         for i, n in enumerate(lens):
-            if swa_index == 0 or interval_id <= swa_index:
+            # swa_index is also 0 for a window under two steps (128 or 384 at step 256), so it
+            # cannot stand for "no sliding window"; the layer count says whether there is one.
+            if sliding_window_layers == 0 or interval_id <= swa_index:
                 costs[i] = query_costs[i] + sequence[n - 1] * cache_layers
             else:
                 full = sequence[n - 1] * (cache_layers - sliding_window_layers)
